@@ -2,10 +2,13 @@
 EvidenceGreedy optimizer: greedy Bayesian evidence-based sparse regression.
 
 This implements a backward elimination strategy that maximizes the
-Bayesian log evidence for a linear model with Gaussian prior on weights:
+Bayesian log evidence for a linear model with a Gaussian prior on the
+weights:
 
     w ~ N(0, alpha^{-1} I)
-    y | w ~ N(Theta w, sigma2 I).
+    y | w ~ N(Theta w, sigma2 I),
+
+where alpha is the prior precision and sigma2 is the noise variance.
 
 For each output dimension y_j, the algorithm:
 
@@ -18,10 +21,6 @@ For each output dimension y_j, the algorithm:
 """
 from __future__ import annotations
 
-from typing import Dict
-from typing import List
-from typing import Tuple
-
 import numpy as np
 
 from .base import BaseOptimizer
@@ -32,43 +31,54 @@ class EvidenceGreedy(BaseOptimizer):
     Backward evidence-based sparse regression for SINDy.
 
     This optimizer performs backward feature elimination driven by the
-    Bayesian log evidence for a linear Gaussian model with an
-    isotropic Gaussian prior on the coefficients:
+    Bayesian log evidence for a linear Gaussian model with an isotropic
+    Gaussian prior on the coefficients:
 
-        w ~ N(0, alpha^{-2} I)
+        w ~ N(0, alpha^{-1} I)
         y | w ~ N(Theta w, sigma2 I).
+
+    Here ``alpha`` is the prior precision on the coefficients
+    (sigma_p^{-2}) and ``sigma2`` is the observation noise variance
+    (sigma^2).
 
     Parameters
     ----------
-    alpha : float
+    alpha : float, default=1.0
         Prior precision on the coefficients (sigma_p^{-2}). Must be positive.
 
-    sigma2 : float
+    sigma2 : float, default=1.0
         Observation noise variance (sigma^2). Must be positive.
 
-    max_iter : int, optional (default 100)
+    max_iter : int, default=100
         Maximum number of backward elimination steps. At most M - 1 steps
         are needed, where M is the number of library terms.
 
-    normalize_columns : bool, optional (default False)
-        Passed to BaseOptimizer. If True, columns of the library matrix
-        are normalized before regression.
+    normalize_columns : bool, default=False
+        Passed to :class:`~pysindy.optimizers.base.BaseOptimizer`. If True,
+        columns of the library matrix are normalized before regression.
 
-    copy_X : bool, optional (default True)
-        Passed to BaseOptimizer. If True, input data are copied.
+    copy_X : bool, default=True
+        Passed to :class:`~pysindy.optimizers.base.BaseOptimizer`. If True,
+        input data are copied.
 
-    initial_guess : array-like or None, optional (default None)
-        Currently ignored by the greedy algorithm; present for API
-        compatibility with BaseOptimizer.
+    initial_guess : array-like of shape (n_targets, n_features) or None, default=None
+        Currently ignored by the greedy algorithm; present for API compatibility
+        with :class:`~pysindy.optimizers.base.BaseOptimizer`.
 
-    unbias : bool, optional (default False)
+    unbias : bool, default=False
         Whether to perform an additional unregularized refit after support
         selection. For a Bayesian evidence interpretation the regularized
         posterior mean is natural, so the default is False.
 
-    verbose : bool, optional (default False)
+    verbose : bool, default=False
         If True, prints a short trace of evidence values during backward
         elimination.
+
+    Notes
+    -----
+    Each target dimension (column of ``y``) is treated independently,
+    reusing the same Gram matrix ``Theta.T @ Theta``. The final
+    coefficient matrix ``coef_`` has shape (n_targets, n_features).
     """
 
     def __init__(
@@ -105,35 +115,33 @@ class EvidenceGreedy(BaseOptimizer):
 
         Parameters
         ----------
-        x : ndarray, shape (n_samples, n_features)
+        x : ndarray of shape (n_samples, n_features)
             Library matrix Theta(X). This has already been preprocessed
             by BaseOptimizer (and may be normalized).
 
-        y : ndarray, shape (n_samples, n_targets)
+        y : ndarray of shape (n_samples, n_targets)
             Target derivatives.
         """
         x = np.asarray(x)
         y = np.asarray(y)
 
-        n_samples, n_features = x.shape
+        n_samples, n_features = x.shape  # T, M
         if y.ndim == 1:
             y = y.reshape(-1, 1)
-        n_targets = y.shape[1]
+        n_targets = y.shape[1]  # N
 
-        # Shared Gram matrix for all outputs
-        G = x.T @ x  # (M, M)
-        # y^T y for each output dimension
-        yTy_all = np.sum(y**2, axis=0)  # (n_targets,)
+        # Shared Gram matrix and RHS for all outputs:
+        G = x.T @ x  # (M, M) = Theta^T Theta
+        B = x.T @ y  # (M, N) = Theta^T Y
+        yTy_all = np.sum(y**2, axis=0)  # (N,) = [y_j^T y_j]
 
         coef = np.zeros((n_targets, n_features), dtype=float)
         ind = np.zeros((n_targets, n_features), dtype=bool)
-        # We keep a simple per-target log-evidence trace, not the full
-        # coefficient path, to limit memory usage.
-        all_histories: List[List[Dict[str, float]]] = []
+        all_histories: list[list[dict[str, float]]] = []
 
         for j in range(n_targets):
-            b = x.T @ y[:, j]  # (M,)
-            yTy = float(yTy_all[j])
+            b = B[:, j]  # (M,)
+            yTy = float(yTy_all[j])  # scalar
 
             coef_j, ind_j, history_j = _backward_evidence_greedy_single(
                 G=G,
@@ -152,9 +160,11 @@ class EvidenceGreedy(BaseOptimizer):
 
         self.coef_ = coef
         self.ind_ = ind
-        # Minimal history: final coefficients only. We keep the log-evidence
-        # trace separately if needed later.
+
+        # Minimal history: final coefficients only.
         self.history_ = [self.coef_]
+        # Expose full evidence traces if required.
+        self.evidence_history_ = all_histories
 
 
 def _log_evidence_from_G(
@@ -164,7 +174,7 @@ def _log_evidence_from_G(
     n_samples: int,
     alpha: float,
     sigma2: float,
-) -> Tuple[float, np.ndarray]:
+) -> tuple[float, np.ndarray]:
     """
     Compute log evidence and posterior mean m_N for a given active set.
 
@@ -271,7 +281,7 @@ def _backward_evidence_greedy_single(
     sigma2: float,
     max_iter: int,
     verbose: bool = False,
-) -> Tuple[np.ndarray, np.ndarray, List[Dict[str, float]]]:
+) -> tuple[np.ndarray, np.ndarray, list[dict[str, float]]]:
     """
     Backward greedy evidence maximization for a single output dimension.
 
@@ -322,13 +332,11 @@ def _backward_evidence_greedy_single(
 
     # Start with full support
     active = np.ones(M, dtype=bool)
-    history: List[Dict[str, float]] = []
+    history: list[dict[str, float]] = []
 
-    G_act = G
-    b_act = b
     log_ev, m_N = _log_evidence_from_G(
-        G_active=G_act,
-        b_active=b_act,
+        G_active=G,
+        b_active=b,
         yTy=yTy,
         n_samples=n_samples,
         alpha=alpha,
