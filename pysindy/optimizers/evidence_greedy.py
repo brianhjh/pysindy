@@ -1,23 +1,7 @@
 """
 EvidenceGreedy optimizer: greedy Bayesian evidence-based sparse regression.
 
-This implements a backward elimination strategy that maximizes the
-Bayesian log evidence for a linear model with a Gaussian prior on the
-weights:
-
-    w ~ N(0, alpha^{-1} I)
-    y | w ~ N(Theta w, sigma2 I),
-
-where alpha is the prior precision and sigma2 is the noise variance.
-
-For each output dimension y_j, the algorithm:
-
-  1. Starts from the full support (all library terms active).
-  2. At each step, tries removing each active term in turn.
-  3. For each candidate removal, computes the log evidence
-     log p(y_j | alpha, sigma2, support).
-  4. Removes the term whose removal gives the largest increase in evidence.
-  5. Stops when no removal increases the evidence.
+See :class:`pysindy.optimizers.EvidenceGreedy` for full documentation.
 """
 from __future__ import annotations
 
@@ -32,14 +16,27 @@ class EvidenceGreedy(BaseOptimizer):
 
     This optimizer performs backward feature elimination driven by the
     Bayesian log evidence for a linear Gaussian model with an isotropic
-    Gaussian prior on the coefficients:
+    Gaussian prior on the coefficients. For each target dimension y_j,
+    we assume
 
-        w ~ N(0, alpha^{-1} I)
-        y | w ~ N(Theta w, sigma2 I).
+    .. math::
 
-    Here ``alpha`` is the prior precision on the coefficients
+        w &\\sim \\mathcal{N}(0, \\alpha^{-1} I), \\\\
+        y_j \\mid w &\\sim \\mathcal{N}(\\Theta w, \\sigma^2 I),
+
+    where ``alpha`` is the prior precision on the coefficients
     (sigma_p^{-2}) and ``sigma2`` is the observation noise variance
     (sigma^2).
+
+    The algorithm:
+
+      1. Starts from the full support (all library terms active).
+      2. At each step, temporarily removes each active term in turn.
+      3. For each candidate support, computes the Bayesian log evidence
+         log p(y_j | alpha, sigma2, support) using precomputed
+         statistics G = Theta^T Theta and b_j = Theta^T y_j.
+      4. Accepts the removal that yields the largest increase in evidence.
+      5. Stops when no single removal increases the evidence.
 
     Parameters
     ----------
@@ -61,7 +58,8 @@ class EvidenceGreedy(BaseOptimizer):
         Passed to :class:`~pysindy.optimizers.base.BaseOptimizer`. If True,
         input data are copied.
 
-    initial_guess : array-like of shape (n_targets, n_features) or None, default=None
+    initial_guess : array-like of shape (n_targets, n_features) or None, \
+            default=None
         Currently ignored by the greedy algorithm; present for API compatibility
         with :class:`~pysindy.optimizers.base.BaseOptimizer`.
 
@@ -72,13 +70,68 @@ class EvidenceGreedy(BaseOptimizer):
 
     verbose : bool, default=False
         If True, prints a short trace of evidence values during backward
-        elimination.
+        elimination for each target dimension.
+
+    Attributes
+    ----------
+    coef_ : ndarray of shape (n_targets, n_features)
+        Final coefficient matrix Xi. Row i contains the coefficients for
+        the i-th target variable, with zeros outside the selected support.
+
+    ind_ : ndarray of bool of shape (n_targets, n_features)
+        Boolean support mask corresponding to ``coef_``. ``ind_[i, j]`` is
+        True if the j-th library function is active in the equation for the
+        i-th target.
+
+    history_ : list of ndarray
+        Minimal coefficient history kept for compatibility with other
+        optimizers. By convention ``history_[-1]`` is the final coefficient
+        matrix ``coef_``.
+
+    evidence_history_ : list of list of dict
+        Per-target evidence traces. ``evidence_history_[i]`` is a list of
+        dictionaries recording the support size and log evidence at each
+        backward-elimination step for the i-th target, e.g.::
+
+            {"step": k,
+             "removed": j,
+             "support_size": K,
+             "log_evidence": value}
 
     Notes
     -----
     Each target dimension (column of ``y``) is treated independently,
-    reusing the same Gram matrix ``Theta.T @ Theta``. The final
-    coefficient matrix ``coef_`` has shape (n_targets, n_features).
+    reusing the shared Gram matrix ``Theta.T @ Theta`` and precomputed
+    vectors ``Theta.T @ y_j`` and ``y_j.T @ y_j``. This avoids redundant
+    linear algebra across multiple outputs. The final coefficient matrix
+    ``coef_`` has shape (n_targets, n_features).
+
+    Examples
+    --------
+    >>> import numpy as np
+    >>> from scipy.integrate import odeint
+    >>> from pysindy import SINDy
+    >>> from pysindy.optimizers import EvidenceGreedy
+    >>>
+    >>> # Lorenz system
+    >>> lorenz = lambda z, t: [
+    ...     10 * (z[1] - z[0]),
+    ...     z[0] * (28 - z[2]) - z[1],
+    ...     z[0] * z[1] - 8 / 3 * z[2],
+    ... ]
+    >>> t = np.arange(0, 2, 0.002)
+    >>> x = odeint(lorenz, [-8, 8, 27], t)
+    >>>
+    >>> opt = EvidenceGreedy(alpha=1.0, sigma2=1e-4, max_iter=20)
+    >>> model = SINDy(optimizer=opt)
+    >>> model.fit(x, t=t[1] - t[0])
+    >>> model.print()
+
+    x0' = -0.003 1 + -10.001 x0 + 10.001 x1
+    x1' = 0.035 1 + 27.998 x0 + -0.996 x1 + -0.005 x2\
+          + 0.001 x0 x1 + -1.000 x0 x2 + -0.001 x1^2
+    x2' = -0.082 1 + -0.008 x0 + 0.011 x1 + -2.658 x2\
+          + 0.001 x0^2 + 1.000 x0 x1 + -0.001 x1 x2
     """
 
     def __init__(
