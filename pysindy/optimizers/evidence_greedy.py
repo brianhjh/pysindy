@@ -5,7 +5,11 @@ See :class:`pysindy.optimizers.EvidenceGreedy` for full documentation.
 """
 from __future__ import annotations
 
+import warnings
+
 import numpy as np
+from scipy.linalg import LinAlgWarning
+from sklearn.linear_model import ridge_regression
 
 from .base import BaseOptimizer
 
@@ -197,6 +201,8 @@ class EvidenceGreedy(BaseOptimizer):
             yTy = float(yTy_all[j])  # scalar
 
             coef_j, ind_j, history_j = _backward_evidence_greedy_single(
+                x=x,
+                y_col=y[:, j],
                 G=G,
                 b=b,
                 yTy=yTy,
@@ -220,6 +226,50 @@ class EvidenceGreedy(BaseOptimizer):
         self.evidence_history_ = all_histories
 
 
+def _ridge_map(
+    X_active: np.ndarray,
+    y_active: np.ndarray,
+    alpha_prior: float,
+    sigma2: float,
+    ridge_kw: dict | None = None,
+) -> np.ndarray:
+    """
+    Compute the MAP coefficients for a given active set using ridge regression.
+
+    This solves the ridge problem
+
+        argmin_w ||y - X w||^2 + lambda ||w||^2,
+
+    where lambda = alpha_prior * sigma2, corresponding to a Gaussian
+    prior w ~ N(0, alpha_prior^{-1} I) and noise variance sigma2.
+
+    Any LinAlgWarning raised by the underlying solver is converted into a
+    RuntimeWarning, but the returned coefficients are still used.
+    """
+    X_active = np.asarray(X_active)
+    y_active = np.asarray(y_active).ravel()
+
+    lam = alpha_prior * sigma2
+    kw = ridge_kw or {}
+
+    # Follow the STLSQ pattern: use ridge_regression and handle LinAlgWarning.
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.filterwarnings("always", category=LinAlgWarning)
+        coef = ridge_regression(X_active, y_active, lam, **kw)
+
+    # If any LinAlgWarning occurred, surface a warning to the user but continue.
+    for w in caught:
+        if issubclass(w.category, LinAlgWarning):
+            warnings.warn(
+                "EvidenceGreedy: linear algebra warning encountered while "
+                "computing MAP coefficients; results may be unreliable.",
+                RuntimeWarning,
+            )
+            break
+
+    return coef
+
+
 def _log_evidence_from_G(
     G_active: np.ndarray,
     b_active: np.ndarray,
@@ -227,9 +277,10 @@ def _log_evidence_from_G(
     n_samples: int,
     alpha: float,
     sigma2: float,
-) -> tuple[float, np.ndarray]:
+    m_N: np.ndarray | None,
+) -> float:
     """
-    Compute log evidence and posterior mean m_N for a given active set.
+    Compute the Bayesian log evidence for a given active set and posterior mean.
 
     Notation:
 
@@ -238,7 +289,7 @@ def _log_evidence_from_G(
       - beta = sigma^{-2}
       - G = Theta^T Theta,  b = Theta^T y,  yTy = y^T y
       - Lambda = alpha I_M + beta G_active
-      - m_N = beta * Lambda^{-1} b_active
+      - m_N is the posterior mean on the active set
 
     Evidence approximation:
 
@@ -273,14 +324,18 @@ def _log_evidence_from_G(
     sigma2 : float
         Observation noise variance.
 
+    m_N : ndarray of shape (K,) or None
+        Posterior mean coefficients for the active set. For the empty
+        model (K == 0), this is ignored and may be None.
+
     Returns
     -------
     log_ev : float
         Bayesian log evidence.
-
-    m_N : ndarray, shape (K,)
-        Posterior mean coefficients for the active set.
     """
+    G_active = np.asarray(G_active)
+    b_active = np.asarray(b_active)
+
     K = G_active.shape[0]
 
     # Degenerate empty model: p(y) = N(0, sigma2 I)
@@ -289,31 +344,27 @@ def _log_evidence_from_G(
         term2 = n_samples * np.log(sigma2)
         term3 = (1.0 / sigma2) * yTy
         log_ev = -0.5 * (term1 + term2 + term3)
-        return float(log_ev), np.zeros(0, dtype=float)
+        return float(log_ev)
+
+    if m_N is None:
+        raise ValueError("m_N must be provided for a non-empty active set.")
+
+    m_N = np.asarray(m_N).reshape(-1)
+    if m_N.shape[0] != K:
+        raise ValueError("m_N has incompatible shape for the active set.")
 
     beta = 1.0 / sigma2
-
-    # Posterior precision and mean
-    Lambda = alpha * np.eye(K) + beta * G_active
-
-    try:
-        m_N = beta * np.linalg.solve(Lambda, b_active)
-    except np.linalg.LinAlgError:
-        # Fallback to least-squares solve if Lambda is nearly singular
-        m_N = (
-            beta
-            * np.linalg.lstsq(Lambda, b_active.reshape(-1, 1), rcond=None)[0].ravel()
-        )
 
     # Residual norm using precomputed stats:
     #   ||y - Theta m_N||^2 = yTy - 2 m_N^T b_active + m_N^T G_active m_N
     residual_sq = yTy - 2.0 * float(m_N.T @ b_active) + float(m_N.T @ (G_active @ m_N))
 
     # log|Lambda|
+    Lambda = alpha * np.eye(K) + beta * G_active
     sign, logdet_Lambda = np.linalg.slogdet(Lambda)
     if sign <= 0:
         # Numerically bad model; treat as very low evidence.
-        return -np.inf, m_N
+        return float(-np.inf)
 
     term1 = n_samples * np.log(2.0 * np.pi)
     term2 = n_samples * np.log(sigma2)
@@ -322,10 +373,12 @@ def _log_evidence_from_G(
     term5 = alpha * float(m_N.T @ m_N)
 
     log_ev = -0.5 * (term1 + term2 + term3 + term4 + term5)
-    return float(log_ev), m_N
+    return float(log_ev)
 
 
 def _backward_evidence_greedy_single(
+    x: np.ndarray,
+    y_col: np.ndarray,
     G: np.ndarray,
     b: np.ndarray,
     yTy: float,
@@ -340,14 +393,20 @@ def _backward_evidence_greedy_single(
 
     Parameters
     ----------
+    x : ndarray, shape (n_samples, M)
+        Library matrix Theta(X) for this regression problem.
+
+    y_col : ndarray, shape (n_samples,)
+        Single target column y_j.
+
     G : ndarray, shape (M, M)
         Full Gram matrix Theta^T Theta.
 
     b : ndarray, shape (M,)
-        Full vector Theta^T y.
+        Full vector Theta^T y_j.
 
     yTy : float
-        Scalar y^T y.
+        Scalar y_j^T y_j.
 
     n_samples : int
         Number of time samples T.
@@ -376,10 +435,16 @@ def _backward_evidence_greedy_single(
         Diagnostics for each step:
         [{"step": ..., "support_size": ..., "log_evidence": ...}, ...]
     """
+    x = np.asarray(x)
+    y_col = np.asarray(y_col).ravel()
     G = np.asarray(G)
     b = np.asarray(b)
 
-    M = G.shape[0]
+    n_samples_x, M = x.shape
+    if n_samples_x != n_samples:
+        raise ValueError("Mismatch between n_samples and x.shape[0].")
+    if G.shape != (M, M):
+        raise ValueError("G must have shape (M, M).")
     if b.shape[0] != M:
         raise ValueError("Dimensions of G and b are inconsistent.")
 
@@ -387,17 +452,23 @@ def _backward_evidence_greedy_single(
     active = np.ones(M, dtype=bool)
     history: list[dict[str, float]] = []
 
-    log_ev, m_N = _log_evidence_from_G(
+    # Initial MAP estimate on the full support
+    J_full = np.where(active)[0]
+    m_full = _ridge_map(x[:, J_full], y_col, alpha_prior=alpha, sigma2=sigma2)
+
+    log_ev = _log_evidence_from_G(
         G_active=G,
         b_active=b,
         yTy=yTy,
         n_samples=n_samples,
         alpha=alpha,
         sigma2=sigma2,
+        m_N=m_full,
     )
 
     best_log_ev = log_ev
-    best_m = m_N.copy()
+    best_m = np.zeros(M, dtype=float)
+    best_m[J_full] = m_full
     best_active = active.copy()
 
     if verbose:
@@ -424,9 +495,8 @@ def _backward_evidence_greedy_single(
             break
 
         best_step_log_ev = -np.inf
-        best_step_idx = None
-        best_step_indices = None
-        best_step_m = None
+        best_step_idx: int | None = None
+        best_step_m_full: np.ndarray | None = None
 
         # Try removing each currently active feature
         for idx in active_indices:
@@ -434,26 +504,41 @@ def _backward_evidence_greedy_single(
             mask_candidate[idx] = False
             J = np.where(mask_candidate)[0]
 
-            G_J = G[np.ix_(J, J)]
-            b_J = b[J]
-
-            log_ev_J, m_J = _log_evidence_from_G(
-                G_active=G_J,
-                b_active=b_J,
-                yTy=yTy,
-                n_samples=n_samples,
-                alpha=alpha,
-                sigma2=sigma2,
-            )
+            if J.size == 0:
+                # Evaluate the empty model analytically
+                log_ev_J = _log_evidence_from_G(
+                    G_active=G[np.ix_(J, J)],
+                    b_active=b[J],
+                    yTy=yTy,
+                    n_samples=n_samples,
+                    alpha=alpha,
+                    sigma2=sigma2,
+                    m_N=None,
+                )
+                m_full_candidate = np.zeros(M, dtype=float)
+            else:
+                G_J = G[np.ix_(J, J)]
+                b_J = b[J]
+                m_J = _ridge_map(x[:, J], y_col, alpha_prior=alpha, sigma2=sigma2)
+                log_ev_J = _log_evidence_from_G(
+                    G_active=G_J,
+                    b_active=b_J,
+                    yTy=yTy,
+                    n_samples=n_samples,
+                    alpha=alpha,
+                    sigma2=sigma2,
+                    m_N=m_J,
+                )
+                m_full_candidate = np.zeros(M, dtype=float)
+                m_full_candidate[J] = m_J
 
             if log_ev_J > best_step_log_ev:
                 best_step_log_ev = log_ev_J
-                best_step_idx = idx
-                best_step_indices = J
-                best_step_m = m_J
+                best_step_idx = int(idx)
+                best_step_m_full = m_full_candidate
 
         # If no candidate improves evidence, stop
-        if best_step_log_ev <= best_log_ev:
+        if best_step_log_ev <= best_log_ev or best_step_idx is None:
             if verbose:
                 print(
                     f"[EvidenceGreedy] stop at step {step}: "
@@ -466,9 +551,7 @@ def _backward_evidence_greedy_single(
         # Accept the best removal
         active[best_step_idx] = False
         best_log_ev = best_step_log_ev
-
-        best_m = np.zeros(M, dtype=float)
-        best_m[best_step_indices] = best_step_m
+        best_m = best_step_m_full  # already full-length (M,)
         best_active = active.copy()
 
         if verbose:
