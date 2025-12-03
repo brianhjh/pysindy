@@ -46,6 +46,12 @@ class EvidenceGreedy(BaseOptimizer):
     ----------
     alpha : float, default=1.0
         Prior precision on the coefficients (sigma_p^{-2}). Must be positive.
+        The prior is defined in the feature space actually used by the
+        optimizer. In particular, when ``normalize_columns=True``, ``alpha``
+        controls an isotropic Gaussian prior on the coefficients in the
+        normalized library. Changing ``normalize_columns`` without retuning
+        ``alpha`` will generally change the effective strength of the
+        regularization.
 
     sigma2 : float, default=1.0
         Observation noise variance (sigma^2). Must be positive.
@@ -57,6 +63,9 @@ class EvidenceGreedy(BaseOptimizer):
     normalize_columns : bool, default=False
         Passed to :class:`~pysindy.optimizers.base.BaseOptimizer`. If True,
         columns of the library matrix are normalized before regression.
+        The Bayesian prior and ridge penalty are then applied in this
+        normalized feature space.The learned coefficients are mapped back
+        to the original scale when stored in ``coef_``.
 
     copy_X : bool, default=True
         Passed to :class:`~pysindy.optimizers.base.BaseOptimizer`. If True,
@@ -101,14 +110,6 @@ class EvidenceGreedy(BaseOptimizer):
              "removed": j,
              "support_size": K,
              "log_evidence": value}
-
-    Notes
-    -----
-    Each target dimension (column of ``y``) is treated independently,
-    reusing the shared Gram matrix ``Theta.T @ Theta`` and precomputed
-    vectors ``Theta.T @ y_j`` and ``y_j.T @ y_j``. This avoids redundant
-    linear algebra across multiple outputs. The final coefficient matrix
-    ``coef_`` has shape (n_targets, n_features).
 
     Examples
     --------
