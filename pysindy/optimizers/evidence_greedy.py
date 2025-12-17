@@ -32,6 +32,8 @@ class EvidenceGreedy(BaseOptimizer):
     (sigma_p^{-2}) and ``sigma2`` is the observation noise variance
     (sigma^2).
 
+    #TODO: make it more ml style than statistics look at STLSQ
+
     The algorithm:
 
       1. Starts from the full support (all library terms active).
@@ -64,7 +66,7 @@ class EvidenceGreedy(BaseOptimizer):
         Passed to :class:`~pysindy.optimizers.base.BaseOptimizer`. If True,
         columns of the library matrix are normalized before regression.
         The Bayesian prior and ridge penalty are then applied in this
-        normalized feature space.The learned coefficients are mapped back
+        normalized feature space. The learned coefficients are mapped back
         to the original scale when stored in ``coef_``.
 
     copy_X : bool, default=True
@@ -124,7 +126,7 @@ class EvidenceGreedy(BaseOptimizer):
     ...     z[0] * (28 - z[2]) - z[1],
     ...     z[0] * z[1] - 8 / 3 * z[2],
     ... ]
-    >>> t = np.arange(0, 2, 0.002)
+    >>> t = np.arange(0, 2, 0.002)    TODO: 0, 10, 0.01
     >>> x = odeint(lorenz, [-8, 8, 27], t)
     >>>
     >>> opt = EvidenceGreedy(alpha=1.0, sigma2=1e-4, max_iter=20)
@@ -143,7 +145,7 @@ class EvidenceGreedy(BaseOptimizer):
         self,
         alpha: float = 1.0,
         sigma2: float = 1.0,
-        max_iter: int = 100,
+        max_iter: int = 100,  # TODO: default as M-1 but keep max iter
         normalize_columns: bool = False,
         copy_X: bool = True,
         initial_guess: np.ndarray | None = None,
@@ -159,13 +161,93 @@ class EvidenceGreedy(BaseOptimizer):
         self.sigma2 = float(sigma2)
         self.verbose = bool(verbose)
 
+        # TODO: size of library dimension if mat iter == NaN -> M-1 or use the max_iter
+
         super().__init__(
             max_iter=max_iter,
             normalize_columns=normalize_columns,
-            initial_guess=initial_guess,
-            copy_X=copy_X,
+            initial_guess=initial_guess,  # TODO: Documentation
+            copy_X=copy_X,  # TODO: just leave
             unbias=unbias,
         )
+
+    @staticmethod
+    def finite_difference_sigma2(
+        differentiator,
+        t,
+        sigma_x: float,
+    ) -> float:
+        """
+        Estimate the derivative noise variance sigma2 induced by a
+        finite-difference differentiator under i.i.d. measurement noise
+        on the state.
+
+        This treats ``differentiator._differentiate`` as a linear operator
+        x -> L_dt x. By sending an identity matrix of size T through the
+        operator, we reconstruct the finite-difference matrix L_dt and use
+
+            Var[eta_k] = sigma_x**2 * sum_j L_dt[k, j]**2
+
+        for the induced derivative noise at row k. The returned sigma2 is
+        the average of this variance over all rows that contain only
+        finite values.
+
+        Parameters
+        ----------
+        differentiator : object
+            Differentiation object with a ``_differentiate(X, t)`` method
+            and an ``axis`` attribute, e.g.
+            :class:`pysindy.differentiation.FiniteDifference`.
+        t : array_like of shape (n_samples,)
+            Time grid passed to the differentiator.
+        sigma_x : float
+            Standard deviation of the additive measurement noise on the
+            state x(t). Must be non-negative.
+
+        Returns
+        -------
+        sigma2 : float
+            Estimated variance of the induced noise on the differentiated
+            signal.
+        """
+        t = np.asarray(t)
+        if t.ndim != 1:
+            raise ValueError("t must be a 1D time grid.")
+        if sigma_x < 0:
+            raise ValueError("sigma_x must be non-negative.")
+
+        # For now we only support differentiation along axis 0.
+        diff_axis = getattr(differentiator, "axis", 0)
+        if diff_axis != 0:
+            raise NotImplementedError(
+                "finite_difference_sigma2_from_operator currently assumes "
+                "differentiator.axis == 0."
+            )
+
+        n_samples = t.shape[0]
+        X_probe = np.eye(n_samples, dtype=float)
+
+        # Reconstruct L_dt as the image of the identity under the operator.
+        L_dt = differentiator._differentiate(X_probe, t)
+
+        if L_dt.shape != (n_samples, n_samples):
+            raise RuntimeError(
+                "Unexpected shape from differentiator._differentiate; "
+                f"expected ({n_samples}, {n_samples}), got {L_dt.shape}."
+            )
+
+        # Some boundary rows may be NaN depending on drop_endpoints / periodic.
+        finite_row_mask = np.all(np.isfinite(L_dt), axis=1)
+        if not np.any(finite_row_mask):
+            raise RuntimeError(
+                "Could not find any rows of the finite-difference operator "
+                "without NaNs; check differentiator settings."
+            )
+
+        row_norm_sq = np.sum(L_dt[finite_row_mask] ** 2, axis=1)
+        factor = float(np.mean(row_norm_sq))
+
+        return float(sigma_x**2 * factor)
 
     def _reduce(self, x: np.ndarray, y: np.ndarray) -> None:
         """

@@ -2,6 +2,7 @@ import numpy as np
 from scipy.integrate import odeint
 
 import pysindy as ps
+from pysindy.differentiation import FiniteDifference
 from pysindy.optimizers import EvidenceGreedy
 
 
@@ -25,10 +26,22 @@ def test_evidence_greedy_lorenz_example():
     x0 = [-8.0, 8.0, 27.0]
     x = odeint(lorenz, x0, t)
 
+    fd = FiniteDifference(
+        order=2,
+        d=1,
+        axis=0,
+        is_uniform=True,
+        drop_endpoints=False,
+        periodic=False,
+    )
+
+    sigma_x = 1e-2
+    sigma2 = EvidenceGreedy.finite_difference_sigma2(fd, t, sigma_x)
+
     # EvidenceGreedy optimizer with the same hyperparameters as the docstring
     opt = EvidenceGreedy(
         alpha=1.0,
-        sigma2=1e-4,
+        sigma2=sigma2,
         max_iter=20,
     )
 
