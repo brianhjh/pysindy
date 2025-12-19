@@ -5,10 +5,12 @@ See :class:`pysindy.optimizers.EvidenceGreedy` for full documentation.
 """
 from __future__ import annotations
 
+import sys
 import warnings
 
 import numpy as np
 from scipy.linalg import LinAlgWarning
+from sklearn.linear_model import LinearRegression
 from sklearn.linear_model import ridge_regression
 
 from .base import BaseOptimizer
@@ -58,9 +60,11 @@ class EvidenceGreedy(BaseOptimizer):
     sigma2 : float, default=1.0
         Observation noise variance (sigma^2). Must be positive.
 
-    max_iter : int, default=100
-        Maximum number of backward elimination steps. At most M - 1 steps
-        are needed, where M is the number of library terms.
+    max_iter : int or None
+        Maximum number of elimination steps. If None, at most M - 1
+        removals are allowed.
+
+
 
     normalize_columns : bool, default=False
         Passed to :class:`~pysindy.optimizers.base.BaseOptimizer`. If True,
@@ -145,23 +149,31 @@ class EvidenceGreedy(BaseOptimizer):
         self,
         alpha: float = 1.0,
         sigma2: float = 1.0,
-        max_iter: int = 100,  # TODO: default as M-1 but keep max iter
+        max_iter: int | None = None,
         normalize_columns: bool = False,
         copy_X: bool = True,
         initial_guess: np.ndarray | None = None,
         unbias: bool = False,
         verbose: bool = False,
     ):
+
+        if max_iter is not None and max_iter <= 0:
+            raise ValueError("max_iter must be positive or None.")
         if alpha <= 0:
             raise ValueError("alpha must be positive.")
         if sigma2 <= 0:
             raise ValueError("sigma2 (noise variance) must be positive.")
 
+        # Treat max_iter=None as no limit, but BaseOptimizer requires a positive int
+        if max_iter is None:
+            max_iter = sys.maxsize
+        elif max_iter <= 0:
+            raise ValueError("max_iter must be a positive integer or None")
+
         self.alpha = float(alpha)
         self.sigma2 = float(sigma2)
         self.verbose = bool(verbose)
-
-        # TODO: size of library dimension if mat iter == NaN -> M-1 or use the max_iter
+        self.max_iter = max_iter
 
         super().__init__(
             max_iter=max_iter,
@@ -179,8 +191,7 @@ class EvidenceGreedy(BaseOptimizer):
     ) -> float:
         """
         Estimate the derivative noise variance sigma2 induced by a
-        finite-difference differentiator under i.i.d. measurement noise
-        on the state.
+        finite-difference differentiator.
 
         This treats ``differentiator._differentiate`` as a linear operator
         x -> L_dt x. By sending an identity matrix of size T through the
@@ -220,7 +231,7 @@ class EvidenceGreedy(BaseOptimizer):
         diff_axis = getattr(differentiator, "axis", 0)
         if diff_axis != 0:
             raise NotImplementedError(
-                "finite_difference_sigma2_from_operator currently assumes "
+                "finite_difference_sigma2 currently assumes "
                 "differentiator.axis == 0."
             )
 
@@ -248,6 +259,54 @@ class EvidenceGreedy(BaseOptimizer):
         factor = float(np.mean(row_norm_sq))
 
         return float(sigma_x**2 * factor)
+
+    def _unbias(self, x: np.ndarray, y: np.ndarray) -> None:
+        """
+        Optional unregularized refit on the selected support.
+
+        This mirrors the STLSQ behaviour in the simple case:
+        keep the support ``ind_`` found by the evidence-greedy search,
+        but recompute the coefficients on that support by ordinary
+        least squares (no ridge penalty).
+
+        Parameters
+        ----------
+        x : ndarray of shape (n_samples, n_features)
+            Library matrix Theta(X) after preprocessing / normalization
+            by :class:`BaseOptimizer`.
+        y : ndarray of shape (n_samples, n_targets)
+            Target derivatives after preprocessing.
+        """
+        x = np.asarray(x)
+        y = np.asarray(y)
+
+        if y.ndim == 1:
+            y = y.reshape(-1, 1)
+
+        n_samples, n_features = x.shape
+        _, n_targets = y.shape
+
+        if self.coef_.shape != (n_targets, n_features):
+            raise RuntimeError(
+                "EvidenceGreedy._unbias: unexpected coef_ shape "
+                f"{self.coef_.shape}, expected {(n_targets, n_features)}."
+            )
+
+        # For each target dimension, refit LS on its active columns.
+        for i in range(n_targets):
+            active_mask = self.ind_[i]
+            if not np.any(active_mask):
+                # No active terms for this target; nothing to refit.
+                continue
+
+            X_active = x[:, active_mask]
+            y_i = y[:, i]
+
+            # STLSQ style: use LinearRegression(fit_intercept=False)
+            optvar = LinearRegression(fit_intercept=False).fit(X_active, y_i).coef_
+
+            # Overwrite only active coefficients; inactive remain zero.
+            self.coef_[i, active_mask] = optvar
 
     def _reduce(self, x: np.ndarray, y: np.ndarray) -> None:
         """
@@ -569,8 +628,13 @@ def _backward_evidence_greedy_single(
         }
     )
 
-    # At most M - 1 removals are possible
-    n_steps_max = min(max_iter, max(M - 1, 0))
+    # At most M - 1 removals are possible.
+    # If max_iter is None, perform a full backward elimination
+    # with at most M - 1 removals.
+    if max_iter is None:
+        n_steps_max = max(M - 1, 0)
+    else:
+        n_steps_max = min(max_iter, max(M - 1, 0))
 
     for step in range(1, n_steps_max + 1):
         active_indices = np.where(active)[0]

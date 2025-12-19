@@ -43,6 +43,7 @@ def test_evidence_greedy_lorenz_example():
         alpha=1.0,
         sigma2=sigma2,
         max_iter=20,
+        unbias=False,
     )
 
     model = ps.SINDy(optimizer=opt)
@@ -57,6 +58,18 @@ def test_evidence_greedy_lorenz_example():
 
     # Reasonable recovery tolerance
     assert rel_err < 1e-1
+
+    print(model.optimizer.ind_)
+    print(model.optimizer.coef_)
+
+    import inspect
+
+    print(inspect.signature(model.print))
+    print(model.print.__doc__)
+
+    coef = model.optimizer.coef_
+    mask_display = np.abs(coef) > 1e-3  # try 1e-4 / 1e-5 too
+    print(mask_display)
 
 
 if __name__ == "__main__":
