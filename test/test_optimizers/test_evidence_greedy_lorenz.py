@@ -16,15 +16,20 @@ def lorenz(z, t):
     ]
 
 
+def _lorenz_data():
+    t = np.arange(0, 2, 0.002)
+    x0 = np.array([-8.0, 8.0, 27.0], dtype=float)
+    x = odeint(lorenz, x0, t)
+    return t, x0, x
+
+
 def test_evidence_greedy_lorenz_example():
     """Check that EvidenceGreedy can reasonably recover the Lorenz dynamics.
 
     This mirrors the Lorenz example in the EvidenceGreedy docstring.
     """
     # Time grid and data (same as in the docstring)
-    t = np.arange(0, 2, 0.002)
-    x0 = [-8.0, 8.0, 27.0]
-    x = odeint(lorenz, x0, t)
+    t, x0, x = _lorenz_data()
 
     fd = FiniteDifference(
         order=2,
@@ -42,7 +47,7 @@ def test_evidence_greedy_lorenz_example():
     opt = EvidenceGreedy(
         alpha=1.0,
         sigma2=sigma2,
-        max_iter=20,
+        max_iter=None,
         unbias=False,
     )
 
@@ -61,15 +66,6 @@ def test_evidence_greedy_lorenz_example():
 
     print(model.optimizer.ind_)
     print(model.optimizer.coef_)
-
-    import inspect
-
-    print(inspect.signature(model.print))
-    print(model.print.__doc__)
-
-    coef = model.optimizer.coef_
-    mask_display = np.abs(coef) > 1e-3  # try 1e-4 / 1e-5 too
-    print(mask_display)
 
 
 if __name__ == "__main__":

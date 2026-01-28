@@ -29,6 +29,7 @@ try:  # Waiting on PEP 690 to lazy import CVXPY
 except ImportError:
     sindy_pi_flag = False
 from .optimizers import STLSQ
+from .optimizers import EvidenceGreedy
 from .optimizers.base import _BaseOptimizer
 from .optimizers.base import BaseOptimizer
 from .utils import AxesArray
@@ -1058,6 +1059,232 @@ class DiscreteSINDy(_BaseSINDy):
                 if check_stop_condition(x[i]):
                     return x[: i + 1]
         return x
+
+
+class EvidenceGreedySINDy(SINDy):
+    """
+    Sparse Identification of Nonlinear Dynamical Systems (SINDy).
+    Uses backward evidence-based greedy sparse regression.
+
+    Parameters
+    ----------
+    optimizer
+        Optimization method used to fit the SINDy model. This must be a class
+        extending :class:`pysindy.optimizers.BaseOptimizer`.
+        The default is :class:`pysindy.optimizers.EvidenceGreedy`.
+
+    feature_library
+        Feature library object used to specify candidate right-hand side features.
+        This must be a class extending
+        :class:`pysindy.feature_library.base.BaseFeatureLibrary`.
+        The default option is :class:`pysindy.feature_library.PolynomialLibrary`.
+
+    differentiation_method
+        Method for differentiating the data. This must be a class extending
+        :class:`pysindy.differentiation.base.BaseDifferentiation` class.
+        The default option is centered finite differences.
+
+    sigma_x
+        Measurement noise standard deviation (std) for the state measurements ``x``.
+        If provided *and* ``differentiation_method`` is a :class:`FiniteDifference`,
+        then ``optimizer.sigma2`` is automatically set at fit-time using the
+        finite-difference mapping:
+        ``sigma2 = EvidenceGreedy.finite_difference_sigma2(
+            differentiation_method, t_grid, sigma_x
+        )``.
+        For multiple trajectories, sigma2 is computed per trajectory and averaged.
+
+    Attributes
+    ----------
+    model : ``sklearn.pipeline.Pipeline``
+        The fitted SINDy model pipeline.
+
+    n_input_features_ : int
+        The total number of input features.
+
+    n_output_features_ : int
+        The total number of output features.
+
+    n_control_features_ : int
+        The total number of control input features.
+
+    feature_names : list of str or None
+        Names for the input features.
+
+    Notes
+    -----
+    - Auto-mapping ``sigma_x -> sigma2`` is only performed when:
+      (i) ``sigma_x`` is not None,
+      (ii) ``x_dot`` is None (derivatives are not supplied),
+      (iii) ``differentiation_method`` is a :class:`FiniteDifference`.
+      Otherwise, a warning is issued (when applicable) and the optimizer's
+      existing ``sigma2`` is left unchanged.
+
+    - FiniteDifference is strongly recommended for EvidenceGreedy because the
+      sigma2 mapping is defined in terms of the finite-difference operator. If you
+      use a different differentiator, set ``optimizer.sigma2`` manually.
+
+    Examples
+    --------
+    >>> import numpy as np
+    >>> from scipy.integrate import odeint
+    >>> import pysindy as ps
+    >>> from pysindy.differentiation import FiniteDifference
+    >>> from pysindy.optimizers import EvidenceGreedy
+    >>>
+    >>> def lorenz(z, t):
+    ...     x, y, z_ = z
+    ...     return [10.0 * (y - x), x * (28.0 - z_) - y, x * y - 8.0 / 3.0 * z_]
+    >>>
+    >>> t = np.arange(0, 2, 0.002)
+    >>> x0 = np.array([-8.0, 8.0, 27.0])
+    >>> x = odeint(lorenz, x0, t)
+    >>> dt = t[1] - t[0]
+    >>>
+    >>> fd = FiniteDifference(order=2, axis=0)
+    >>> opt = EvidenceGreedy(alpha=1.0, sigma2=123.456, max_iter=None, unbias=False)
+    >>> model = ps.EvidenceGreedySINDy(
+    ...     optimizer=opt,
+    ...     differentiation_method=fd,
+    ...     feature_library=ps.PolynomialLibrary(degree=2, include_bias=True),
+    ...     sigma_x=1e-2,
+    ... )
+    >>> model.fit(x, t=dt)
+    >>> model.print()
+    >>> model.optimizer.sigma2
+    12.8
+
+    """
+
+    def __init__(
+        self,
+        optimizer: Optional[BaseOptimizer] = None,
+        feature_library: Optional[BaseFeatureLibrary] = None,
+        differentiation_method: Optional[BaseDifferentiation] = None,
+        sigma_x: Optional[float] = None,
+    ):
+        if optimizer is None:
+            eps = float(np.finfo(float).eps)
+            optimizer = EvidenceGreedy(
+                alpha=1.0,
+                sigma2=eps,
+                max_iter=None,
+                normalize_columns=False,
+                unbias=True,
+                verbose=False,
+            )
+        self.optimizer = optimizer
+
+        if feature_library is None:
+            feature_library = PolynomialLibrary()
+        self.feature_library = feature_library
+
+        # Match the continuous-time convention used by SINDy:
+        if differentiation_method is None:
+            differentiation_method = FiniteDifference(axis=-2)
+        self.differentiation_method = differentiation_method
+
+        self.sigma_x = sigma_x
+
+    def fit(
+        self,
+        x,
+        t,
+        x_dot=None,
+        u=None,
+        feature_names: Optional[list[str]] = None,
+    ):
+        """
+        Fit an EvidenceGreedySINDy model.
+
+        See :meth:`pysindy.SINDy.fit` for full parameter documentation.
+        """
+
+        # If derivatives are supplied, sigma_x does not define derivative-noise.
+        if self.sigma_x is not None and x_dot is not None:
+            warnings.warn(
+                "EvidenceGreedySINDy: sigma_x was provided but x_dot was also "
+                "provided. Auto-mapping sigma_x->sigma2 is skipped when x_dot "
+                "is supplied. Set optimizer.sigma2 manually if needed.",
+                UserWarning,
+            )
+            return super().fit(x, t, x_dot=x_dot, u=u, feature_names=feature_names)
+
+        # Auto-map sigma_x -> sigma2 only if sigma_x is provided and FD is used.
+        if self.sigma_x is not None:
+            if not isinstance(self.differentiation_method, FiniteDifference):
+                warnings.warn(
+                    "EvidenceGreedySINDy: sigma_x was provided but "
+                    "differentiation_method is not FiniteDifference, so "
+                    "auto-mapping sigma_x->sigma2 is unavailable. Proceeding "
+                    "without changing optimizer.sigma2. Strongly recommended: "
+                    "use FiniteDifference or set optimizer.sigma2 manually.",
+                    UserWarning,
+                )
+            else:
+                # Ensure we treat everything as multiple trajectories for
+                # sigma2 calculation.
+                if not _check_multiple_trajectories(x, x_dot, u):
+                    x_list, t_list, _, _ = _adapt_to_multiple_trajectories(
+                        x, t, x_dot, u
+                    )
+                else:
+                    x_list, t_list = x, t
+
+                sigma2_vals = []
+                eps = float(np.finfo(float).eps)
+
+                for xi, ti in _zip_like_sequence(x_list, t_list):
+                    xi_arr = np.asarray(xi)
+                    if xi_arr.ndim < 2:
+                        raise ValueError(
+                            "Input x must have at least 2 dimensions "
+                            "(samples, features)."
+                        )
+
+                    n_samples = xi_arr.shape[-2]
+
+                    # Build a time grid for sigma2 mapping
+                    if isinstance(ti, np.ScalarType):
+                        dt = float(ti)
+                        if dt <= 0:
+                            raise ValueError("t (dt) must be positive.")
+                        t_grid = np.arange(n_samples, dtype=float) * dt
+                    else:
+                        t_grid = np.asarray(ti, dtype=float)
+                        if t_grid.ndim != 1:
+                            raise ValueError("t must be a 1D array of time points.")
+                        if len(t_grid) != n_samples:
+                            raise ValueError(
+                                f"Length of t ({len(t_grid)}) does not match "
+                                f"number of samples ({n_samples})."
+                            )
+
+                    sigma2_i = EvidenceGreedy.finite_difference_sigma2(
+                        self.differentiation_method,
+                        t_grid,
+                        float(self.sigma_x),
+                    )
+                    sigma2_vals.append(float(sigma2_i))
+
+                sigma2_mean = float(np.mean(sigma2_vals))
+                sigma2_mean = max(sigma2_mean, eps)  # must be positive
+
+                # If user provided a non-EvidenceGreedy optimizer, this
+                # attribute may not exist. In that case we fail loudly,
+                # because the wrapper is specific to EvidenceGreedy.
+                if not hasattr(self.optimizer, "sigma2"):
+                    raise AttributeError(
+                        "EvidenceGreedySINDy requires an optimizer with a "
+                        "'sigma2' attribute. Got optimizer of type: "
+                        + type(self.optimizer).__name__
+                    )
+
+                # Set sigma2 on the underlying optimizer
+                self.optimizer.sigma2 = sigma2_mean
+
+        # Now run the standard SINDy fitting pipeline.
+        return super().fit(x, t, x_dot=x_dot, u=u, feature_names=feature_names)
 
 
 def _zip_like_sequence(x, t):
