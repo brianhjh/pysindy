@@ -57,7 +57,7 @@ class EvidenceGreedy(BaseOptimizer):
         ``alpha`` will generally change the effective strength of the
         regularization.
 
-    sigma2 : float, default=1.0
+    sigma2 : float, default= (float precision**2)
         Observation noise variance (sigma^2). Must be positive.
 
     max_iter : int or None
@@ -148,7 +148,7 @@ class EvidenceGreedy(BaseOptimizer):
     def __init__(
         self,
         alpha: float = 1.0,
-        sigma2: float = 1.0,
+        sigma2: float = (np.finfo(float).eps) ** 2,
         max_iter: int | None = None,
         normalize_columns: bool = False,
         copy_X: bool = True,

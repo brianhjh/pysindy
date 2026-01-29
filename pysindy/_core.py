@@ -1082,6 +1082,7 @@ class EvidenceGreedySINDy(SINDy):
     differentiation_method
         Method for differentiating the data. This must be a class extending
         :class:`pysindy.differentiation.base.BaseDifferentiation` class.
+        It must also be a linear method.
         The default option is centered finite differences.
 
     sigma_x
@@ -1113,15 +1114,15 @@ class EvidenceGreedySINDy(SINDy):
 
     Notes
     -----
-    - Auto-mapping ``sigma_x -> sigma2`` is only performed when:
+    - Propagation of noise from state measurement noise ``sigma_x``  to noise variance used in regression ``sigma2`` is only performed when:
       (i) ``sigma_x`` is not None,
       (ii) ``x_dot`` is None (derivatives are not supplied),
-      (iii) ``differentiation_method`` is a :class:`FiniteDifference`.
+      (iii) ``differentiation_method`` is a suitable linear method (e.g., :class:`FiniteDifference`, :class:`SmoothedFiniteDifference` or :class:`SpectralDerivative`).
       Otherwise, a warning is issued (when applicable) and the optimizer's
       existing ``sigma2`` is left unchanged.
 
     - FiniteDifference is strongly recommended for EvidenceGreedy because the
-      sigma2 mapping is defined in terms of the finite-difference operator. If you
+      noise propagation algorithm assumes a linear differential operator. If you
       use a different differentiator, set ``optimizer.sigma2`` manually.
 
     Examples
@@ -1160,17 +1161,17 @@ class EvidenceGreedySINDy(SINDy):
         self,
         optimizer: Optional[BaseOptimizer] = None,
         feature_library: Optional[BaseFeatureLibrary] = None,
-        differentiation_method: Optional[BaseDifferentiation] = None,
+        differentiation_method: Optional[FiniteDifference] = None, # Only support differentiation methods that are linear. Otherwise, use x_dot and sigma2 directly.
         sigma_x: Optional[float] = None,
     ):
         if optimizer is None:
             eps = float(np.finfo(float).eps)
             optimizer = EvidenceGreedy(
                 alpha=1.0,
-                sigma2=eps,
+                sigma2=eps**2,
                 max_iter=None,
-                normalize_columns=False,
-                unbias=True,
+                normalize_columns=True,
+                unbias=False,
                 verbose=False,
             )
         self.optimizer = optimizer
@@ -1184,6 +1185,8 @@ class EvidenceGreedySINDy(SINDy):
             differentiation_method = FiniteDifference(axis=-2)
         self.differentiation_method = differentiation_method
 
+        if sigma_x is None:
+            sigma_x = float(np.finfo(float).eps)
         self.sigma_x = sigma_x
 
     def fit(
@@ -1203,85 +1206,86 @@ class EvidenceGreedySINDy(SINDy):
         # If derivatives are supplied, sigma_x does not define derivative-noise.
         if self.sigma_x is not None and x_dot is not None:
             warnings.warn(
-                "EvidenceGreedySINDy: sigma_x was provided but x_dot was also "
-                "provided. Auto-mapping sigma_x->sigma2 is skipped when x_dot "
-                "is supplied. Set optimizer.sigma2 manually if needed.",
+                f"EvidenceGreedySINDy: x_dot was also provided.\n sigma_x will be ignored.\n sigma2 value used: {self.optimizer.sigma2}",
                 UserWarning,
             )
             return super().fit(x, t, x_dot=x_dot, u=u, feature_names=feature_names)
 
-        # Auto-map sigma_x -> sigma2 only if sigma_x is provided and FD is used.
+        # Noise propagation from sigma_x is used.
         if self.sigma_x is not None:
-            if not isinstance(self.differentiation_method, FiniteDifference):
-                warnings.warn(
-                    "EvidenceGreedySINDy: sigma_x was provided but "
-                    "differentiation_method is not FiniteDifference, so "
-                    "auto-mapping sigma_x->sigma2 is unavailable. Proceeding "
-                    "without changing optimizer.sigma2. Strongly recommended: "
-                    "use FiniteDifference or set optimizer.sigma2 manually.",
-                    UserWarning,
+            # Check if the differentiation method is linear (suitable for noise propagation).
+            # TODO: FiniteDifference and SmoothedFiniteDifference are included as it's under FiniteDifference, but what about SpectralDerivative?
+            # if (not isinstance(self.differentiation_method, FiniteDifference)) and (not isinstance(self.differentiation_method, SpectralDerivative)):
+            #     warnings.warn(
+            #         "EvidenceGreedySINDy: sigma_x was provided but "
+            #         "differentiation_method is not FiniteDifference, so "
+            #         "auto-mapping sigma_x->sigma2 is unavailable. Proceeding "
+            #         "without changing optimizer.sigma2. Strongly recommended: "
+            #         "use FiniteDifference or set optimizer.sigma2 manually.",
+            #         UserWarning,
+            #     )
+            # else:
+
+            # Ensure we treat everything as multiple trajectories for
+            # sigma2 calculation.
+            if not _check_multiple_trajectories(x, x_dot, u):
+                x_list, t_list, _, _ = _adapt_to_multiple_trajectories(
+                    x, t, x_dot, u
                 )
             else:
-                # Ensure we treat everything as multiple trajectories for
-                # sigma2 calculation.
-                if not _check_multiple_trajectories(x, x_dot, u):
-                    x_list, t_list, _, _ = _adapt_to_multiple_trajectories(
-                        x, t, x_dot, u
+                x_list, t_list = x, t
+
+            sigma2_vals = []
+            eps = float(np.finfo(float).eps)
+
+            for xi, ti in _zip_like_sequence(x_list, t_list):
+                xi_arr = np.asarray(xi)
+                if xi_arr.ndim < 2:
+                    raise ValueError(
+                        "Input x must have at least 2 dimensions "
+                        "(samples, features)."
                     )
+
+                n_samples = xi_arr.shape[-2]
+
+                # Build a time grid for sigma2 mapping
+                if isinstance(ti, np.ScalarType):
+                    dt = float(ti)
+                    if dt <= 0:
+                        raise ValueError("t (dt) must be positive.")
+                    t_grid = np.arange(n_samples, dtype=float) * dt
                 else:
-                    x_list, t_list = x, t
-
-                sigma2_vals = []
-                eps = float(np.finfo(float).eps)
-
-                for xi, ti in _zip_like_sequence(x_list, t_list):
-                    xi_arr = np.asarray(xi)
-                    if xi_arr.ndim < 2:
+                    t_grid = np.asarray(ti, dtype=float)
+                    if t_grid.ndim != 1:
+                        raise ValueError("t must be a 1D array of time points.")
+                    if len(t_grid) != n_samples:
                         raise ValueError(
-                            "Input x must have at least 2 dimensions "
-                            "(samples, features)."
+                            f"Length of t ({len(t_grid)}) does not match "
+                            f"number of samples ({n_samples})."
                         )
+                # Call TemporalNoisePropagation to compute an averaged sigma2 
+                sigma2_i = EvidenceGreedy.TemporalNoisePropagation(
+                    self.differentiation_method,
+                    t_grid,
+                    float(self.sigma_x),
+                )
+                sigma2_vals.append(float(sigma2_i))
 
-                    n_samples = xi_arr.shape[-2]
+            sigma2_mean = float(np.mean(sigma2_vals))
+            sigma2_mean = max(sigma2_mean, eps)  # must be positive
 
-                    # Build a time grid for sigma2 mapping
-                    if isinstance(ti, np.ScalarType):
-                        dt = float(ti)
-                        if dt <= 0:
-                            raise ValueError("t (dt) must be positive.")
-                        t_grid = np.arange(n_samples, dtype=float) * dt
-                    else:
-                        t_grid = np.asarray(ti, dtype=float)
-                        if t_grid.ndim != 1:
-                            raise ValueError("t must be a 1D array of time points.")
-                        if len(t_grid) != n_samples:
-                            raise ValueError(
-                                f"Length of t ({len(t_grid)}) does not match "
-                                f"number of samples ({n_samples})."
-                            )
+            # If user provided a non-EvidenceGreedy optimizer, this
+            # attribute may not exist. In that case we fail loudly,
+            # because the wrapper is specific to EvidenceGreedy.
+            if not hasattr(self.optimizer, "sigma2"):
+                raise AttributeError(
+                    "EvidenceGreedySINDy requires an optimizer with a "
+                    "'sigma2' attribute. Got optimizer of type: "
+                    + type(self.optimizer).__name__
+                )
 
-                    sigma2_i = EvidenceGreedy.TemporalNoisePropagation(
-                        self.differentiation_method,
-                        t_grid,
-                        float(self.sigma_x),
-                    )
-                    sigma2_vals.append(float(sigma2_i))
-
-                sigma2_mean = float(np.mean(sigma2_vals))
-                sigma2_mean = max(sigma2_mean, eps)  # must be positive
-
-                # If user provided a non-EvidenceGreedy optimizer, this
-                # attribute may not exist. In that case we fail loudly,
-                # because the wrapper is specific to EvidenceGreedy.
-                if not hasattr(self.optimizer, "sigma2"):
-                    raise AttributeError(
-                        "EvidenceGreedySINDy requires an optimizer with a "
-                        "'sigma2' attribute. Got optimizer of type: "
-                        + type(self.optimizer).__name__
-                    )
-
-                # Set sigma2 on the underlying optimizer
-                self.optimizer.sigma2 = sigma2_mean
+            # Set sigma2 on the underlying optimizer
+            self.optimizer.sigma2 = sigma2_mean
 
         # Now run the standard SINDy fitting pipeline.
         return super().fit(x, t, x_dot=x_dot, u=u, feature_names=feature_names)
