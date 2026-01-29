@@ -18,14 +18,17 @@ def lorenz(z, t):
 
 def main():
     # Generate Lorenz data
-    t = np.arange(0.0, 2.0, 0.002)
+    t = np.arange(0, 10, 0.01)
     dt = float(t[1] - t[0])
     x0 = np.array([-8.0, 8.0, 27.0], dtype=float)
     x = odeint(lorenz, x0, t)
 
+    sigma_x = 1e-2
+    x = x + sigma_x * np.random.normal(size=x.shape)
+
     # Differentiation method
     fd = FiniteDifference(
-        order=2,
+        order=6,
         d=1,
         axis=0,
         is_uniform=True,
@@ -34,7 +37,7 @@ def main():
     )
 
     # EvidenceGreedy optimizer
-    sigma_x = 1e-2
+    
     opt = EvidenceGreedy(alpha=1.0, sigma2=123.456, max_iter=None, unbias=False)
 
     # New wrapper object
