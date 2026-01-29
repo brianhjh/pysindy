@@ -202,6 +202,7 @@ class EvidenceGreedy(BaseOptimizer):
         for the induced derivative noise at row k. The returned sigma2 is
         the average of this variance over all rows that contain only
         finite values.
+        # TODO: support pointwise noise variance in future versions.
 
         Parameters
         ----------
@@ -231,8 +232,8 @@ class EvidenceGreedy(BaseOptimizer):
         diff_axis = getattr(differentiator, "axis", 0)
         if diff_axis != 0:
             raise NotImplementedError(
-                "TemporalNoisePropagation currently assumes "
-                "differentiator.axis == 0."
+                "TemporalNoisePropagation currently assumes differentiator in time."
+                "i.e. differentiator.axis == 0."
             )
 
         n_samples = t.shape[0]
