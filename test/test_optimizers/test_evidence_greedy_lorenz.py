@@ -41,7 +41,7 @@ def test_evidence_greedy_lorenz_example():
     )
 
     sigma_x = 1e-2
-    sigma2 = EvidenceGreedy.finite_difference_sigma2(fd, t, sigma_x)
+    sigma2 = EvidenceGreedy.TemporalNoisePropagation(fd, t, sigma_x)
 
     # EvidenceGreedy optimizer with the same hyperparameters as the docstring
     opt = EvidenceGreedy(

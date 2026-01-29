@@ -1089,7 +1089,7 @@ class EvidenceGreedySINDy(SINDy):
         If provided *and* ``differentiation_method`` is a :class:`FiniteDifference`,
         then ``optimizer.sigma2`` is automatically set at fit-time using the
         finite-difference mapping:
-        ``sigma2 = EvidenceGreedy.finite_difference_sigma2(
+        ``sigma2 = EvidenceGreedy.TemporalNoisePropagation(
             differentiation_method, t_grid, sigma_x
         )``.
         For multiple trajectories, sigma2 is computed per trajectory and averaged.
@@ -1260,7 +1260,7 @@ class EvidenceGreedySINDy(SINDy):
                                 f"number of samples ({n_samples})."
                             )
 
-                    sigma2_i = EvidenceGreedy.finite_difference_sigma2(
+                    sigma2_i = EvidenceGreedy.TemporalNoisePropagation(
                         self.differentiation_method,
                         t_grid,
                         float(self.sigma_x),

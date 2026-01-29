@@ -184,7 +184,7 @@ class EvidenceGreedy(BaseOptimizer):
         )
 
     @staticmethod
-    def finite_difference_sigma2(
+    def TemporalNoisePropagation(
         differentiator,
         t,
         sigma_x: float,
@@ -231,7 +231,7 @@ class EvidenceGreedy(BaseOptimizer):
         diff_axis = getattr(differentiator, "axis", 0)
         if diff_axis != 0:
             raise NotImplementedError(
-                "finite_difference_sigma2 currently assumes "
+                "TemporalNoisePropagation currently assumes "
                 "differentiator.axis == 0."
             )
 
@@ -248,6 +248,7 @@ class EvidenceGreedy(BaseOptimizer):
             )
 
         # Some boundary rows may be NaN depending on drop_endpoints / periodic.
+        # Here, we remove those rows from the estimate.
         finite_row_mask = np.all(np.isfinite(L_dt), axis=1)
         if not np.any(finite_row_mask):
             raise RuntimeError(
@@ -255,6 +256,8 @@ class EvidenceGreedy(BaseOptimizer):
                 "without NaNs; check differentiator settings."
             )
 
+        # In this version, we use the mean variance over all valid time points as the noise estimate after propagation.
+        # TODO: Support pointwise noise variance in future versions.
         row_norm_sq = np.sum(L_dt[finite_row_mask] ** 2, axis=1)
         factor = float(np.mean(row_norm_sq))
 
