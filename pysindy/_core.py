@@ -1116,7 +1116,7 @@ class EvidenceGreedySINDy(SINDy):
     -----
     - Propagation of noise from state measurement noise ``sigma_x``  to noise variance used in regression ``sigma2`` is only performed when:
       (i) ``sigma_x`` is not None,
-      (ii) ``x_dot`` is None (derivatives are not supplied),
+      (ii) ``x_dot`` is None (derivatives are expxected to be supplied in the next step supplied),
       (iii) ``differentiation_method`` is a suitable linear method (e.g., :class:`FiniteDifference`, :class:`SmoothedFiniteDifference` or :class:`SpectralDerivative`).
       Otherwise, a warning is issued (when applicable) and the optimizer's
       existing ``sigma2`` is left unchanged.
@@ -1215,16 +1215,18 @@ class EvidenceGreedySINDy(SINDy):
         if self.sigma_x is not None:
             # Check if the differentiation method is linear (suitable for noise propagation).
             # TODO: FiniteDifference and SmoothedFiniteDifference are included as it's under FiniteDifference, but what about SpectralDerivative?
-            # if (not isinstance(self.differentiation_method, FiniteDifference)) and (not isinstance(self.differentiation_method, SpectralDerivative)):
-            #     warnings.warn(
-            #         "EvidenceGreedySINDy: sigma_x was provided but "
-            #         "differentiation_method is not FiniteDifference, so "
-            #         "auto-mapping sigma_x->sigma2 is unavailable. Proceeding "
-            #         "without changing optimizer.sigma2. Strongly recommended: "
-            #         "use FiniteDifference or set optimizer.sigma2 manually.",
-            #         UserWarning,
-            #     )
-            # else:
+
+            # Removed the following check in favour of constraining to FiniteDifference class only in the input
+                # if (not isinstance(self.differentiation_method, FiniteDifference)) and (not isinstance(self.differentiation_method, SpectralDerivative)):
+                #     warnings.warn(
+                #         "EvidenceGreedySINDy: sigma_x was provided but "
+                #         "differentiation_method is not FiniteDifference, so "
+                #         "auto-mapping sigma_x->sigma2 is unavailable. Proceeding "
+                #         "without changing optimizer.sigma2. Strongly recommended: "
+                #         "use FiniteDifference or set optimizer.sigma2 manually.",
+                #         UserWarning,
+                #     )
+                # else:
 
             # Ensure we treat everything as multiple trajectories for
             # sigma2 calculation.
