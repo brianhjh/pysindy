@@ -67,7 +67,7 @@ class EvidenceGreedy(BaseOptimizer):
 
 
 
-    normalize_columns : bool, default=False
+    normalize_columns : bool, default=True
         Passed to :class:`~pysindy.optimizers.base.BaseOptimizer`. If True,
         BOTH the columns of the library matrix AND the target variables are normalized before regression.
         The Bayesian prior and ridge penalty are then applied in this
@@ -139,9 +139,8 @@ class EvidenceGreedy(BaseOptimizer):
     >>> sigma_x = 1e-2
     >>> x = x + sigma_x * np.random.normal(size=x.shape)
     >>>
-    >>> sigma2 = EvidenceGreedy.TemporalNoisePropagation(fd, t, sigma_x)
-    >>> opt = EvidenceGreedy(alpha=1e-6, _sigma2=sigma2, max_iter=20)
-    >>> model = SINDy(optimizer=opt)
+    >>> opt = EvidenceGreedy(alpha=1e-6, max_iter=20, normalize_columns=False)
+    >>> model = BINDy(optimizer=opt)
     >>> model.fit(x, t=t[1] - t[0])
     >>> model.print()
 
