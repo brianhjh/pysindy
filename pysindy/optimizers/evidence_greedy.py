@@ -233,14 +233,6 @@ class EvidenceGreedy(BaseOptimizer):
         if sigma_x < 0:
             raise ValueError("sigma_x must be non-negative.")
 
-        # For now we only support differentiation along axis 0.
-        diff_axis = getattr(differentiator, "axis", 0)
-        if diff_axis != 0:
-            raise NotImplementedError(
-                "TemporalNoisePropagation currently assumes differentiator in time."
-                "i.e. differentiator.axis == 0."
-            )
-
         n_samples = t.shape[0]
         X_probe = np.eye(n_samples, dtype=float)
 
