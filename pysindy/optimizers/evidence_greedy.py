@@ -361,7 +361,7 @@ class EvidenceGreedy(BaseOptimizer):
             else:
                 _sigma2_ = self._sigma2
 
-            coef_j, ind_j, history_j = _backward_evidence_greedy_single(
+            coef_j, ind_j, history_j, coef_hist = _backward_evidence_greedy_single(
                 x=x,
                 y_col=y[:, j],
                 G=G,
@@ -378,6 +378,12 @@ class EvidenceGreedy(BaseOptimizer):
             ind[j, :] = ind_j
             all_histories.append(history_j)
 
+            ## For history, we need to reshape to match the format of other optimizers.
+            for i in range(np.shape(coef_hist)[1]):
+                history_tmp = np.full((n_targets, n_features), np.nan, dtype=float)
+                history_tmp[j,:] = coef_hist[:,i]
+                self.history_.append(history_tmp)
+
         self.coef_ = coef
         self.ind_ = ind
 
@@ -385,8 +391,6 @@ class EvidenceGreedy(BaseOptimizer):
         if self.normalize_columns:
             self.coef_ = self.coef_ * y_norm.reshape(-1, 1)
 
-        # Minimal history: final coefficients only. TODO: output full history?
-        self.history_ = [self.coef_]
         # Expose full evidence traces if required.
         self.evidence_history_ = all_histories
 
@@ -616,6 +620,7 @@ def _backward_evidence_greedy_single(
     # Start with full support
     active = np.ones(M, dtype=bool)
     history: list[dict[str, float]] = []
+    
 
     # Initial MAP estimate on the full support
     J_full = np.where(active)[0]
@@ -658,6 +663,8 @@ def _backward_evidence_greedy_single(
         n_steps_max = max(M - 1, 0)
     else:
         n_steps_max = min(max_iter, max(M - 1, 0))
+
+    m_hist = np.zeros((M,n_steps_max+1),dtype=float)
 
     for step in range(1, n_steps_max + 1):
         active_indices = np.where(active)[0]
@@ -706,6 +713,7 @@ def _backward_evidence_greedy_single(
                 best_step_log_ev = log_ev_J
                 best_step_idx = int(idx)
                 best_step_m_full = m_full_candidate
+                m_hist[:, step] = m_full_candidate
 
         # If no candidate improves evidence, stop
         if best_step_log_ev <= best_log_ev or best_step_idx is None:
@@ -740,4 +748,4 @@ def _backward_evidence_greedy_single(
             }
         )
 
-    return best_m, best_active, history
+    return best_m, best_active, history, m_hist
