@@ -51,23 +51,12 @@ def test_evidence_greedy_lorenz_example():
     opt = EvidenceGreedy(
         alpha=1e-6,
         _sigma2=sigma2,
-        max_iter=None,
-        unbias=False,
-        normalize_columns = False,
+        max_iter=20
     )
 
     model = ps.SINDy(optimizer=opt)
     model.fit(x, t=t[1] - t[0])
     model.print()
-
-    # Forward simulate from the same initial condition
-    # x_sim = model.simulate(x0, t)
-
-    # Check that the learned model reproduces the trajectory reasonably well
-    # rel_err = np.linalg.norm(x_sim - x) / np.linalg.norm(x)
-
-    # Reasonable recovery tolerance
-    # assert rel_err < 1e-1
 
     print(model.optimizer.ind_.T)
     print(model.optimizer.coef_.T)
