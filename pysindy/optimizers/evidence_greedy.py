@@ -130,19 +130,22 @@ class EvidenceGreedy(BaseOptimizer):
     ...     z[0] * (28 - z[2]) - z[1],
     ...     z[0] * z[1] - 8 / 3 * z[2],
     ... ]
-    >>> t = np.arange(0, 2, 0.002)    TODO: 0, 10, 0.01
+    >>> t = np.arange(0, 10, 0.01)
     >>> x = odeint(lorenz, [-8, 8, 27], t)
     >>>
-    >>> opt = EvidenceGreedy(alpha=1.0, _sigma2=1e-4, max_iter=20)
+    >>> # Add noise to the measurements
+    >>> sigma_x = 1e-2
+    >>> x = x + sigma_x * np.random.normal(size=x.shape)
+    >>>
+    >>> sigma2 = EvidenceGreedy.TemporalNoisePropagation(fd, t, sigma_x)
+    >>> opt = EvidenceGreedy(alpha=1e-6, _sigma2=sigma2, max_iter=20)
     >>> model = SINDy(optimizer=opt)
     >>> model.fit(x, t=t[1] - t[0])
     >>> model.print()
 
-    x0' = -0.003 1 + -10.001 x0 + 10.001 x1
-    x1' = 0.035 1 + 27.998 x0 + -0.996 x1 + -0.005 x2\
-          + 0.001 x0 x1 + -1.000 x0 x2 + -0.001 x1^2
-    x2' = -0.082 1 + -0.008 x0 + 0.011 x1 + -2.658 x2\
-          + 0.001 x0^2 + 1.000 x0 x1 + -0.001 x1 x2
+    (x0)' = -9.979 x0 + 9.980 x1\
+    (x1)' = 27.807 x0 + -0.963 x1 + -0.995 x0 x2\
+    (x2)' = -2.658 x2 + 0.997 x0 x1 
     """
 
     def __init__(
