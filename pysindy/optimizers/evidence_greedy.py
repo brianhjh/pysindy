@@ -14,6 +14,7 @@ from sklearn.linear_model import LinearRegression
 from sklearn.linear_model import ridge_regression
 
 from .base import BaseOptimizer
+from .base import _normalize_features
 
 
 class EvidenceGreedy(BaseOptimizer):
@@ -68,10 +69,11 @@ class EvidenceGreedy(BaseOptimizer):
 
     normalize_columns : bool, default=False
         Passed to :class:`~pysindy.optimizers.base.BaseOptimizer`. If True,
-        columns of the library matrix are normalized before regression.
+        BOTH the columns of the library matrix AND the target variables are normalized before regression.
         The Bayesian prior and ridge penalty are then applied in this
-        normalized feature space. The learned coefficients are mapped back
+        normalized space. The learned coefficients are mapped back
         to the original scale when stored in ``coef_``.
+        Note that when normalized_columns is True, the ``alpha`` is typically of order 1.0.
 
     copy_X : bool, default=True
         Passed to :class:`~pysindy.optimizers.base.BaseOptimizer`. If True,
@@ -153,7 +155,7 @@ class EvidenceGreedy(BaseOptimizer):
         alpha: float = 1.0,
         _sigma2: float = (np.finfo(float).eps) ** 2,
         max_iter: int | None = None,
-        normalize_columns: bool = False,
+        normalize_columns: bool = True,
         copy_X: bool = True,
         initial_guess: np.ndarray | None = None,
         unbias: bool = False,
@@ -336,6 +338,10 @@ class EvidenceGreedy(BaseOptimizer):
             y = y.reshape(-1, 1)
         n_targets = y.shape[1]  # N
 
+        # BaseOptimizer only normalise the library, but for the Bayesian framework, we also need to normalize the targets. Normalising this help make sure the parameter is also rescaled to unit order.
+        if self.normalize_columns:
+            y_norm, y = _normalize_features(y)
+
         # Shared Gram matrix and RHS for all outputs:
         G = x.T @ x  # (M, M) = Theta^T Theta
         B = x.T @ y  # (M, N) = Theta^T Y
@@ -349,6 +355,12 @@ class EvidenceGreedy(BaseOptimizer):
             b = B[:, j]  # (M,)
             yTy = float(yTy_all[j])  # scalar
 
+            # Since the target (Y) is also possibly normalized, we need to rescale _sigma2 accordingly.
+            if self.normalize_columns:
+                _sigma2_ = self._sigma2 / (y_norm[j] ** 2)
+            else:
+                _sigma2_ = self._sigma2
+
             coef_j, ind_j, history_j = _backward_evidence_greedy_single(
                 x=x,
                 y_col=y[:, j],
@@ -357,7 +369,7 @@ class EvidenceGreedy(BaseOptimizer):
                 yTy=yTy,
                 n_samples=n_samples,
                 alpha=self.alpha,
-                _sigma2=self._sigma2,
+                _sigma2=_sigma2_,
                 max_iter=self.max_iter,
                 verbose=self.verbose,
             )
@@ -369,7 +381,11 @@ class EvidenceGreedy(BaseOptimizer):
         self.coef_ = coef
         self.ind_ = ind
 
-        # Minimal history: final coefficients only.
+        # Map coefficients back to original scale if normalized.
+        if self.normalize_columns:
+            self.coef_ = self.coef_ * y_norm.reshape(-1, 1)
+
+        # Minimal history: final coefficients only. TODO: output full history?
         self.history_ = [self.coef_]
         # Expose full evidence traces if required.
         self.evidence_history_ = all_histories
