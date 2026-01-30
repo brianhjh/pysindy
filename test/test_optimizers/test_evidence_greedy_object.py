@@ -41,7 +41,7 @@ def main():
     opt = EvidenceGreedy(alpha=1.0, sigma2=123.456, max_iter=None, unbias=False)
 
     # New wrapper object
-    model = ps.EvidenceGreedySINDy(
+    model = ps.BINDy(
         optimizer=opt,
         differentiation_method=fd,
         feature_library=ps.PolynomialLibrary(degree=2, include_bias=True),

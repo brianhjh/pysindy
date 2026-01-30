@@ -1061,7 +1061,7 @@ class DiscreteSINDy(_BaseSINDy):
         return x
 
 
-class EvidenceGreedySINDy(SINDy):
+class BINDy(SINDy):
     """
     Sparse Identification of Nonlinear Dynamical Systems (SINDy).
     Uses backward evidence-based greedy sparse regression.
@@ -1144,7 +1144,7 @@ class EvidenceGreedySINDy(SINDy):
     >>>
     >>> fd = FiniteDifference(order=2, axis=0)
     >>> opt = EvidenceGreedy(alpha=1.0, sigma2=123.456, max_iter=None, unbias=False)
-    >>> model = ps.EvidenceGreedySINDy(
+    >>> model = ps.BINDy(
     ...     optimizer=opt,
     ...     differentiation_method=fd,
     ...     feature_library=ps.PolynomialLibrary(degree=2, include_bias=True),
@@ -1198,7 +1198,7 @@ class EvidenceGreedySINDy(SINDy):
         feature_names: Optional[list[str]] = None,
     ):
         """
-        Fit an EvidenceGreedySINDy model.
+        Fit an BINDy model.
 
         See :meth:`pysindy.SINDy.fit` for full parameter documentation.
         """
@@ -1206,7 +1206,7 @@ class EvidenceGreedySINDy(SINDy):
         # If derivatives are supplied, sigma_x does not define derivative-noise.
         if self.sigma_x is not None and x_dot is not None:
             warnings.warn(
-                f"EvidenceGreedySINDy: x_dot was also provided.\n sigma_x will be ignored.\n sigma2 value used: {self.optimizer.sigma2}",
+                f"BINDy: x_dot was also provided.\n sigma_x will be ignored.\n sigma2 value used: {self.optimizer.sigma2}",
                 UserWarning,
             )
             return super().fit(x, t, x_dot=x_dot, u=u, feature_names=feature_names)
@@ -1219,7 +1219,7 @@ class EvidenceGreedySINDy(SINDy):
             # Removed the following check in favour of constraining to FiniteDifference class only in the input
                 # if (not isinstance(self.differentiation_method, FiniteDifference)) and (not isinstance(self.differentiation_method, SpectralDerivative)):
                 #     warnings.warn(
-                #         "EvidenceGreedySINDy: sigma_x was provided but "
+                #         "BINDy: sigma_x was provided but "
                 #         "differentiation_method is not FiniteDifference, so "
                 #         "auto-mapping sigma_x->sigma2 is unavailable. Proceeding "
                 #         "without changing optimizer.sigma2. Strongly recommended: "
@@ -1281,7 +1281,7 @@ class EvidenceGreedySINDy(SINDy):
             # because the wrapper is specific to EvidenceGreedy.
             if not hasattr(self.optimizer, "sigma2"):
                 raise AttributeError(
-                    "EvidenceGreedySINDy requires an optimizer with a "
+                    "BINDy requires an optimizer with a "
                     "'sigma2' attribute. Got optimizer of type: "
                     + type(self.optimizer).__name__
                 )
