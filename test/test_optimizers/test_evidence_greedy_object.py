@@ -38,7 +38,7 @@ def main():
 
     # EvidenceGreedy optimizer
     
-    opt = EvidenceGreedy(alpha=1.0, sigma2=123.456, max_iter=None, unbias=False)
+    opt = EvidenceGreedy(alpha=1.0, max_iter=None, unbias=False)
 
     # New wrapper object
     model = ps.BINDy(
@@ -48,14 +48,15 @@ def main():
         sigma_x=sigma_x,
     )
 
-    print("\n=== EvidenceGreedySINDy (Lorenz) ===")
+    print("\n=== BINDy (Lorenz) ===")
     print("sigma_x:", sigma_x)
-    print("sigma2 before fit (sentinel):", opt.sigma2)
+    print("_sigma2 before fit (sentinel):", opt._sigma2)
 
+    x_dot = fd._differentiate(x, t)
     # Fit using scalar dt
     model.fit(x, t=dt)
 
-    print("sigma2 after fit (mapped):", model.optimizer.sigma2)
+    print("_sigma2 after fit (mapped):", model.optimizer._sigma2)
     print("\nRecovered equations:")
     model.print(precision=3)
 

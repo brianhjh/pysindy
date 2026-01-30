@@ -1068,6 +1068,16 @@ class BINDy(SINDy):
 
     Parameters
     ----------
+    sigma_x (required): float
+        Measurement noise standard deviation (std) for the state measurements ``x``.
+        If x_dot is provided, sigma_x is directly used to set noise variance ``optimizer._sigma2=sigma_x**2``.
+        Otherwise, sigma_x is propagated through the ``differentiation_method`` by 
+        ``_sigma2 = EvidenceGreedy.TemporalNoisePropagation(
+            differentiation_method, t_grid, sigma_x
+        )`` to estimate
+        the derivative noise variance.
+        For multiple trajectories, _sigma2 is computed per trajectory and averaged.
+
     optimizer
         Optimization method used to fit the SINDy model. This must be a class
         extending :class:`pysindy.optimizers.BaseOptimizer`.
@@ -1084,16 +1094,6 @@ class BINDy(SINDy):
         :class:`pysindy.differentiation.base.BaseDifferentiation` class.
         It must also be a linear method.
         The default option is centered finite differences.
-
-    sigma_x
-        Measurement noise standard deviation (std) for the state measurements ``x``.
-        If provided *and* ``differentiation_method`` is a :class:`FiniteDifference`,
-        then ``optimizer.sigma2`` is automatically set at fit-time using the
-        finite-difference mapping:
-        ``sigma2 = EvidenceGreedy.TemporalNoisePropagation(
-            differentiation_method, t_grid, sigma_x
-        )``.
-        For multiple trajectories, sigma2 is computed per trajectory and averaged.
 
     Attributes
     ----------
@@ -1114,16 +1114,14 @@ class BINDy(SINDy):
 
     Notes
     -----
-    - Propagation of noise from state measurement noise ``sigma_x``  to noise variance used in regression ``sigma2`` is only performed when:
-      (i) ``sigma_x`` is not None,
-      (ii) ``x_dot`` is None (derivatives are expxected to be supplied in the next step supplied),
-      (iii) ``differentiation_method`` is a suitable linear method (e.g., :class:`FiniteDifference`, :class:`SmoothedFiniteDifference` or :class:`SpectralDerivative`).
-      Otherwise, a warning is issued (when applicable) and the optimizer's
-      existing ``sigma2`` is left unchanged.
+    - Propagation of noise from state measurement noise ``sigma_x``  to noise variance used in regression ``_sigma2`` is only performed when:
+      (i) ``x_dot`` is None (derivatives are expxected to be supplied in the next step supplied),
+      (ii) ``differentiation_method`` is a suitable linear method (e.g., :class:`FiniteDifference` or :class:`SmoothedFiniteDifference`).
+      (Currently, spectral differentiation is not supported for noise propagation.)
 
     - FiniteDifference is strongly recommended for EvidenceGreedy because the
       noise propagation algorithm assumes a linear differential operator. If you
-      use a different differentiator, set ``optimizer.sigma2`` manually.
+      use a different differentiator, set ``optimizer._sigma2`` manually.
 
     Examples
     --------
@@ -1143,7 +1141,7 @@ class BINDy(SINDy):
     >>> dt = t[1] - t[0]
     >>>
     >>> fd = FiniteDifference(order=2, axis=0)
-    >>> opt = EvidenceGreedy(alpha=1.0, sigma2=123.456, max_iter=None, unbias=False)
+    >>> opt = EvidenceGreedy(alpha=1.0, max_iter=None, unbias=False)
     >>> model = ps.BINDy(
     ...     optimizer=opt,
     ...     differentiation_method=fd,
@@ -1152,23 +1150,22 @@ class BINDy(SINDy):
     ... )
     >>> model.fit(x, t=dt)
     >>> model.print()
-    >>> model.optimizer.sigma2
-    12.8
+    >>> model.optimizer._sigma2
+    1e-4
 
     """
 
     def __init__(
         self,
+        sigma_x: float,
         optimizer: Optional[BaseOptimizer] = None,
         feature_library: Optional[BaseFeatureLibrary] = None,
-        differentiation_method: Optional[FiniteDifference] = None, # Only support differentiation methods that are linear. Otherwise, use x_dot and sigma2 directly.
-        sigma_x: Optional[float] = None,
+        differentiation_method: Optional[FiniteDifference] = None, # Only support differentiation methods that are linear. # TODO: FiniteDifference and SmoothedFiniteDifference are included as it's under FiniteDifference, but what about SpectralDerivative?
     ):
         if optimizer is None:
-            eps = float(np.finfo(float).eps)
             optimizer = EvidenceGreedy(
                 alpha=1.0,
-                sigma2=eps**2,
+                _sigma2=sigma_x**2,
                 max_iter=None,
                 normalize_columns=True,
                 unbias=False,
@@ -1185,8 +1182,6 @@ class BINDy(SINDy):
             differentiation_method = FiniteDifference(axis=-2)
         self.differentiation_method = differentiation_method
 
-        if sigma_x is None:
-            sigma_x = float(np.finfo(float).eps)
         self.sigma_x = sigma_x
 
     def fit(
@@ -1204,32 +1199,16 @@ class BINDy(SINDy):
         """
 
         # If derivatives are supplied, sigma_x does not define derivative-noise.
-        if self.sigma_x is not None and x_dot is not None:
+        if x_dot is not None:
+            self.optimizer._sigma2 = self.sigma_x**2
             warnings.warn(
-                f"BINDy: x_dot was also provided.\n sigma_x will be ignored.\n sigma2 value used: {self.optimizer.sigma2}",
+                f"BINDy: Noise is not propagated through differentiation method. Assume noise variance from specificed sigma_x.\n _sigma2 value used: {self.optimizer._sigma2}",
                 UserWarning,
             )
             return super().fit(x, t, x_dot=x_dot, u=u, feature_names=feature_names)
-
-        # Noise propagation from sigma_x is used.
-        if self.sigma_x is not None:
-            # Check if the differentiation method is linear (suitable for noise propagation).
-            # TODO: FiniteDifference and SmoothedFiniteDifference are included as it's under FiniteDifference, but what about SpectralDerivative?
-
-            # Removed the following check in favour of constraining to FiniteDifference class only in the input
-                # if (not isinstance(self.differentiation_method, FiniteDifference)) and (not isinstance(self.differentiation_method, SpectralDerivative)):
-                #     warnings.warn(
-                #         "BINDy: sigma_x was provided but "
-                #         "differentiation_method is not FiniteDifference, so "
-                #         "auto-mapping sigma_x->sigma2 is unavailable. Proceeding "
-                #         "without changing optimizer.sigma2. Strongly recommended: "
-                #         "use FiniteDifference or set optimizer.sigma2 manually.",
-                #         UserWarning,
-                #     )
-                # else:
-
+        else:
             # Ensure we treat everything as multiple trajectories for
-            # sigma2 calculation.
+            # _sigma2 calculation.
             if not _check_multiple_trajectories(x, x_dot, u):
                 x_list, t_list, _, _ = _adapt_to_multiple_trajectories(
                     x, t, x_dot, u
@@ -1237,7 +1216,7 @@ class BINDy(SINDy):
             else:
                 x_list, t_list = x, t
 
-            sigma2_vals = []
+            _sigma2_vals = []
             eps = float(np.finfo(float).eps)
 
             for xi, ti in _zip_like_sequence(x_list, t_list):
@@ -1250,7 +1229,7 @@ class BINDy(SINDy):
 
                 n_samples = xi_arr.shape[-2]
 
-                # Build a time grid for sigma2 mapping
+                # Build a time grid for _sigma2 mapping
                 if isinstance(ti, np.ScalarType):
                     dt = float(ti)
                     if dt <= 0:
@@ -1265,29 +1244,29 @@ class BINDy(SINDy):
                             f"Length of t ({len(t_grid)}) does not match "
                             f"number of samples ({n_samples})."
                         )
-                # Call TemporalNoisePropagation to compute an averaged sigma2 
-                sigma2_i = EvidenceGreedy.TemporalNoisePropagation(
+                # Call TemporalNoisePropagation to compute an averaged _sigma2 
+                _sigma2_i = EvidenceGreedy.TemporalNoisePropagation(
                     self.differentiation_method,
                     t_grid,
                     float(self.sigma_x),
                 )
-                sigma2_vals.append(float(sigma2_i))
+                _sigma2_vals.append(float(_sigma2_i))
 
-            sigma2_mean = float(np.mean(sigma2_vals))
-            sigma2_mean = max(sigma2_mean, eps)  # must be positive
+            _sigma2_mean = float(np.mean(_sigma2_vals))
+            _sigma2_mean = max(_sigma2_mean, eps)  # must be positive
 
             # If user provided a non-EvidenceGreedy optimizer, this
             # attribute may not exist. In that case we fail loudly,
             # because the wrapper is specific to EvidenceGreedy.
-            if not hasattr(self.optimizer, "sigma2"):
+            if not hasattr(self.optimizer, "_sigma2"):
                 raise AttributeError(
                     "BINDy requires an optimizer with a "
-                    "'sigma2' attribute. Got optimizer of type: "
+                    "'_sigma2' attribute. Got optimizer of type: "
                     + type(self.optimizer).__name__
                 )
 
-            # Set sigma2 on the underlying optimizer
-            self.optimizer.sigma2 = sigma2_mean
+            # Set _sigma2 on the underlying optimizer
+            self.optimizer._sigma2 = _sigma2_mean
 
         # Now run the standard SINDy fitting pipeline.
         return super().fit(x, t, x_dot=x_dot, u=u, feature_names=feature_names)

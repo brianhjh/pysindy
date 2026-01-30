@@ -131,8 +131,8 @@ def data(request):
         SBR(num_warmup=10, num_samples=10),
         EvidenceGreedy(
             alpha=1.0,
-            sigma2=1e-6,
-            max_iter=10,
+            _sigma2=1e-2,
+            max_iter=100,
             normalize_columns=True,
             unbias=False,
         ),  # changes

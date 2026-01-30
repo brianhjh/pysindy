@@ -31,7 +31,7 @@ class EvidenceGreedy(BaseOptimizer):
         y_j \\mid w &\\sim \\mathcal{N}(\\Theta w, \\sigma^2 I),
 
     where ``alpha`` is the prior precision on the coefficients
-    (sigma_p^{-2}) and ``sigma2`` is the observation noise variance
+    (sigma_p^{-2}) and ``_sigma2`` is the observation noise variance
     (sigma^2).
 
     #TODO: make it more ml style than statistics look at STLSQ
@@ -41,7 +41,7 @@ class EvidenceGreedy(BaseOptimizer):
       1. Starts from the full support (all library terms active).
       2. At each step, temporarily removes each active term in turn.
       3. For each candidate support, computes the Bayesian log evidence
-         log p(y_j | alpha, sigma2, support) using precomputed
+         log p(y_j | alpha, _sigma2, support) using precomputed
          statistics G = Theta^T Theta and b_j = Theta^T y_j.
       4. Accepts the removal that yields the largest increase in evidence.
       5. Stops when no single removal increases the evidence.
@@ -57,7 +57,7 @@ class EvidenceGreedy(BaseOptimizer):
         ``alpha`` will generally change the effective strength of the
         regularization.
 
-    sigma2 : float, default= (float precision**2)
+    _sigma2 : float, default= (float precision**2)
         Observation noise variance (sigma^2). Must be positive.
 
     max_iter : int or None
@@ -133,7 +133,7 @@ class EvidenceGreedy(BaseOptimizer):
     >>> t = np.arange(0, 2, 0.002)    TODO: 0, 10, 0.01
     >>> x = odeint(lorenz, [-8, 8, 27], t)
     >>>
-    >>> opt = EvidenceGreedy(alpha=1.0, sigma2=1e-4, max_iter=20)
+    >>> opt = EvidenceGreedy(alpha=1.0, _sigma2=1e-4, max_iter=20)
     >>> model = SINDy(optimizer=opt)
     >>> model.fit(x, t=t[1] - t[0])
     >>> model.print()
@@ -148,7 +148,7 @@ class EvidenceGreedy(BaseOptimizer):
     def __init__(
         self,
         alpha: float = 1.0,
-        sigma2: float = (np.finfo(float).eps) ** 2,
+        _sigma2: float = (np.finfo(float).eps) ** 2,
         max_iter: int | None = None,
         normalize_columns: bool = False,
         copy_X: bool = True,
@@ -161,8 +161,8 @@ class EvidenceGreedy(BaseOptimizer):
             raise ValueError("max_iter must be positive or None.")
         if alpha <= 0:
             raise ValueError("alpha must be positive.")
-        if sigma2 <= 0:
-            raise ValueError("sigma2 (noise variance) must be positive.")
+        if _sigma2 <= 0:
+            raise ValueError("_sigma2 (noise variance) must be positive.")
 
         # Treat max_iter=None as no limit, but BaseOptimizer requires a positive int
         if max_iter is None:
@@ -171,7 +171,7 @@ class EvidenceGreedy(BaseOptimizer):
             raise ValueError("max_iter must be a positive integer or None")
 
         self.alpha = float(alpha)
-        self.sigma2 = float(sigma2)
+        self._sigma2 = float(_sigma2)
         self.verbose = bool(verbose)
         self.max_iter = max_iter
 
@@ -190,7 +190,7 @@ class EvidenceGreedy(BaseOptimizer):
         sigma_x: float,
     ) -> float:
         """
-        Estimate the derivative noise variance sigma2 induced by a
+        Estimate the derivative noise variance _sigma2 induced by a
         finite-difference differentiator.
 
         This treats ``differentiator._differentiate`` as a linear operator
@@ -199,7 +199,7 @@ class EvidenceGreedy(BaseOptimizer):
 
             Var[eta_k] = sigma_x**2 * sum_j L_dt[k, j]**2
 
-        for the induced derivative noise at row k. The returned sigma2 is
+        for the induced derivative noise at row k. The returned _sigma2 is
         the average of this variance over all rows that contain only
         finite values.
         # TODO: support pointwise noise variance in future versions.
@@ -218,7 +218,7 @@ class EvidenceGreedy(BaseOptimizer):
 
         Returns
         -------
-        sigma2 : float
+        _sigma2 : float
             Estimated variance of the induced noise on the differentiated
             signal.
         """
@@ -354,7 +354,7 @@ class EvidenceGreedy(BaseOptimizer):
                 yTy=yTy,
                 n_samples=n_samples,
                 alpha=self.alpha,
-                sigma2=self.sigma2,
+                _sigma2=self._sigma2,
                 max_iter=self.max_iter,
                 verbose=self.verbose,
             )
@@ -376,7 +376,7 @@ def _ridge_map(
     X_active: np.ndarray,
     y_active: np.ndarray,
     alpha_prior: float,
-    sigma2: float,
+    _sigma2: float,
     ridge_kw: dict | None = None,
 ) -> np.ndarray:
     """
@@ -386,8 +386,8 @@ def _ridge_map(
 
         argmin_w ||y - X w||^2 + lambda ||w||^2,
 
-    where lambda = alpha_prior * sigma2, corresponding to a Gaussian
-    prior w ~ N(0, alpha_prior^{-1} I) and noise variance sigma2.
+    where lambda = alpha_prior * _sigma2, corresponding to a Gaussian
+    prior w ~ N(0, alpha_prior^{-1} I) and noise variance _sigma2.
 
     Any LinAlgWarning raised by the underlying solver is converted into a
     RuntimeWarning, but the returned coefficients are still used.
@@ -395,7 +395,7 @@ def _ridge_map(
     X_active = np.asarray(X_active)
     y_active = np.asarray(y_active).ravel()
 
-    lam = alpha_prior * sigma2
+    lam = alpha_prior * _sigma2
     kw = ridge_kw or {}
 
     # Follow the STLSQ pattern: use ridge_regression and handle LinAlgWarning.
@@ -422,7 +422,7 @@ def _log_evidence_from_G(
     yTy: float,
     n_samples: int,
     alpha: float,
-    sigma2: float,
+    _sigma2: float,
     m_N: np.ndarray | None,
 ) -> float:
     """
@@ -467,7 +467,7 @@ def _log_evidence_from_G(
     alpha : float
         Prior precision on weights.
 
-    sigma2 : float
+    _sigma2 : float
         Observation noise variance.
 
     m_N : ndarray of shape (K,) or None
@@ -484,11 +484,11 @@ def _log_evidence_from_G(
 
     K = G_active.shape[0]
 
-    # Degenerate empty model: p(y) = N(0, sigma2 I)
+    # Degenerate empty model: p(y) = N(0, _sigma2 I)
     if K == 0:
         term1 = n_samples * np.log(2.0 * np.pi)
-        term2 = n_samples * np.log(sigma2)
-        term3 = (1.0 / sigma2) * yTy
+        term2 = n_samples * np.log(_sigma2)
+        term3 = (1.0 / _sigma2) * yTy
         log_ev = -0.5 * (term1 + term2 + term3)
         return float(log_ev)
 
@@ -499,7 +499,7 @@ def _log_evidence_from_G(
     if m_N.shape[0] != K:
         raise ValueError("m_N has incompatible shape for the active set.")
 
-    beta = 1.0 / sigma2
+    beta = 1.0 / _sigma2
 
     # Residual norm using precomputed stats:
     #   ||y - Theta m_N||^2 = yTy - 2 m_N^T b_active + m_N^T G_active m_N
@@ -513,9 +513,9 @@ def _log_evidence_from_G(
         return float(-np.inf)
 
     term1 = n_samples * np.log(2.0 * np.pi)
-    term2 = n_samples * np.log(sigma2)
+    term2 = n_samples * np.log(_sigma2)
     term3 = logdet_Lambda - K * np.log(alpha)
-    term4 = (1.0 / sigma2) * residual_sq
+    term4 = (1.0 / _sigma2) * residual_sq
     term5 = alpha * float(m_N.T @ m_N)
 
     log_ev = -0.5 * (term1 + term2 + term3 + term4 + term5)
@@ -530,7 +530,7 @@ def _backward_evidence_greedy_single(
     yTy: float,
     n_samples: int,
     alpha: float,
-    sigma2: float,
+    _sigma2: float,
     max_iter: int,
     verbose: bool = False,
 ) -> tuple[np.ndarray, np.ndarray, list[dict[str, float]]]:
@@ -560,7 +560,7 @@ def _backward_evidence_greedy_single(
     alpha : float
         Prior precision on weights.
 
-    sigma2 : float
+    _sigma2 : float
         Observation noise variance.
 
     max_iter : int
@@ -600,7 +600,7 @@ def _backward_evidence_greedy_single(
 
     # Initial MAP estimate on the full support
     J_full = np.where(active)[0]
-    m_full = _ridge_map(x[:, J_full], y_col, alpha_prior=alpha, sigma2=sigma2)
+    m_full = _ridge_map(x[:, J_full], y_col, alpha_prior=alpha, _sigma2=_sigma2)
 
     log_ev = _log_evidence_from_G(
         G_active=G,
@@ -608,7 +608,7 @@ def _backward_evidence_greedy_single(
         yTy=yTy,
         n_samples=n_samples,
         alpha=alpha,
-        sigma2=sigma2,
+        _sigma2=_sigma2,
         m_N=m_full,
     )
 
@@ -663,21 +663,21 @@ def _backward_evidence_greedy_single(
                     yTy=yTy,
                     n_samples=n_samples,
                     alpha=alpha,
-                    sigma2=sigma2,
+                    _sigma2=_sigma2,
                     m_N=None,
                 )
                 m_full_candidate = np.zeros(M, dtype=float)
             else:
                 G_J = G[np.ix_(J, J)]
                 b_J = b[J]
-                m_J = _ridge_map(x[:, J], y_col, alpha_prior=alpha, sigma2=sigma2)
+                m_J = _ridge_map(x[:, J], y_col, alpha_prior=alpha, _sigma2=_sigma2)
                 log_ev_J = _log_evidence_from_G(
                     G_active=G_J,
                     b_active=b_J,
                     yTy=yTy,
                     n_samples=n_samples,
                     alpha=alpha,
-                    sigma2=sigma2,
+                    _sigma2=_sigma2,
                     m_N=m_J,
                 )
                 m_full_candidate = np.zeros(M, dtype=float)
