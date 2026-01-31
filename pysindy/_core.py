@@ -13,7 +13,6 @@ from scipy.integrate import solve_ivp
 from scipy.interpolate import interp1d
 from sklearn.base import BaseEstimator
 from sklearn.metrics import r2_score
-from sklearn.pipeline import Pipeline
 from sklearn.utils.validation import check_is_fitted
 from typing_extensions import Self
 
@@ -48,7 +47,6 @@ class _BaseSINDy(BaseEstimator, ABC):
 
     feature_library: BaseFeatureLibrary
     optimizer: _BaseOptimizer
-    model: Pipeline
     # Hacks to remove later
     feature_names: Optional[list[str]]
     n_control_features_: int = 0
@@ -107,7 +105,7 @@ class _BaseSINDy(BaseEstimator, ABC):
 
         x, _, u = _comprehend_and_validate_inputs(x, 1, None, u, self.feature_library)
 
-        check_is_fitted(self, "model")
+        check_is_fitted(self)
         if self.n_control_features_ > 0 and u is None:
             raise TypeError("Model was fit using control variables, so u is required")
         if self.n_control_features_ == 0 and u is not None:
@@ -119,7 +117,11 @@ class _BaseSINDy(BaseEstimator, ABC):
         if u is not None:
             u = validate_control_variables(x, u)
             x = [np.concatenate((xi, ui), axis=xi.ax_coord) for xi, ui in zip(x, u)]
-        result = [self.model.predict([xi]) for xi in x]
+
+        x_feat = self.feature_library.transform(x)
+        x_feat = [SampleConcatter().fit_transform([xi]) for xi in x_feat]
+
+        result = [self.optimizer.predict(xi) for xi in x_feat]
         result = [
             self.feature_library.reshape_samples_to_spatial_grid(pred)
             for pred in result
@@ -159,7 +161,7 @@ class _BaseSINDy(BaseEstimator, ABC):
             List of strings representing the SINDy model equations for each
             input feature.
         """
-        check_is_fitted(self, "model")
+        check_is_fitted(self)
         sys_coord_names = self.feature_names
         feat_names = self.feature_library.get_feature_names(sys_coord_names)
 
@@ -168,14 +170,14 @@ class _BaseSINDy(BaseEstimator, ABC):
             if rounded_coef == 0:
                 return ""
             else:
-                return f"{c:.{precision}f} {name}"
+                return f"{c: .{precision}f} {name}"
 
         equations = []
         for coef_row in self.optimizer.coef_:
             components = [term(c, i) for c, i in zip(coef_row, feat_names)]
             eq = " + ".join(filter(bool, components))
             if not eq:
-                eq = f"{0:.{precision}f}"
+                eq = f"{0: .{precision}f}"
             equations.append(eq)
 
         return equations
@@ -209,7 +211,7 @@ class _BaseSINDy(BaseEstimator, ABC):
             A list of strings giving the names of the features in the feature
             library, :code:`self.feature_library`.
         """
-        check_is_fitted(self, "model")
+        check_is_fitted(self)
         return self.feature_library.get_feature_names(input_features=self.feature_names)
 
 
@@ -401,14 +403,10 @@ class SINDy(_BaseSINDy):
 
         self.feature_names = feature_names
 
-        steps = [
-            ("features", self.feature_library),
-            ("shaping", SampleConcatter()),
-            ("model", self.optimizer),
-        ]
         x_dot = concat_sample_axis(x_dot)
-        self.model = Pipeline(steps)
-        self.model.fit(x, x_dot)
+        x = self.feature_library.fit_transform(x)
+        x = SampleConcatter().fit_transform(x)
+        self.optimizer.fit(x, x_dot)
         self._fit_shape()
 
         return self
@@ -591,7 +589,7 @@ class SINDy(_BaseSINDy):
         x: numpy array, shape (n_samples, n_features)
             Simulation results
         """
-        check_is_fitted(self, "model")
+        check_is_fitted(self)
         if u is None and self.n_control_features_ > 0:
             raise TypeError("Model was fit using control variables, so u is required")
 
@@ -871,14 +869,10 @@ class DiscreteSINDy(_BaseSINDy):
 
         self.feature_names = feature_names
 
-        steps = [
-            ("features", self.feature_library),
-            ("shaping", SampleConcatter()),
-            ("model", self.optimizer),
-        ]
         x_next = concat_sample_axis(x_next)
-        self.model = Pipeline(steps)
-        self.model.fit(x, x_next)
+        x = self.feature_library.fit_transform(x)
+        x = SampleConcatter().fit_transform(x)
+        self.optimizer.fit(x, x_next)
         self._fit_shape()
 
         return self
@@ -899,7 +893,7 @@ class DiscreteSINDy(_BaseSINDy):
             List of strings representing the DiscreteSINDy model equations for each
             input feature.
         """
-        check_is_fitted(self, "model")
+        check_is_fitted(self)
         sys_coord_names = [name + "[k]" for name in self.feature_names]
         feat_names = self.feature_library.get_feature_names(sys_coord_names)
 
@@ -908,14 +902,14 @@ class DiscreteSINDy(_BaseSINDy):
             if rounded_coef == 0:
                 return ""
             else:
-                return f"{c:.{precision}f} {name}"
+                return f"{c: .{precision}f} {name}"
 
         equations = []
         for coef_row in self.optimizer.coef_:
             components = [term(c, i) for c, i in zip(coef_row, feat_names)]
             eq = " + ".join(filter(bool, components))
             if not eq:
-                eq = f"{0:.{precision}f}"
+                eq = f"{0: .{precision}f}"
             equations.append(eq)
 
         return equations
@@ -1023,7 +1017,7 @@ class DiscreteSINDy(_BaseSINDy):
         x: numpy array, shape (n_samples, n_features)
             Simulation results
         """
-        check_is_fitted(self, "model")
+        check_is_fitted(self)
         if u is None and self.n_control_features_ > 0:
             raise TypeError("Model was fit using control variables, so u is required")
 
