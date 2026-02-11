@@ -41,6 +41,7 @@ from .optimizers import SR3
 from .optimizers import SSR
 from .optimizers import STLSQ
 from .optimizers import EnsembleOptimizer
+from .optimizers import EvidenceGreedy
 
 try:
     from .optimizers import ConstrainedSR3
@@ -72,6 +73,7 @@ __all__ = [
     "SINDy",
     "DiscreteSINDy",
     "BINDy",
+    "EvidenceGreedy",
     "WeakSINDy",
     "ParallelImplicitSINDy",
     "differentiation",

@@ -1,9 +1,13 @@
 """EvidenceGreedy optimizer: greedy Bayesian evidence-based sparse regression."""
+from __future__ import annotations
+
 import sys
 import warnings
+from typing import Iterable
 
 import numpy as np
 from scipy.linalg import LinAlgWarning
+from sklearn.linear_model import LinearRegression
 from sklearn.linear_model import ridge_regression
 
 from .base import _normalize_features
@@ -12,142 +16,27 @@ from .base import BaseOptimizer
 
 class EvidenceGreedy(BaseOptimizer):
     r"""
-    Sparse Regression by maximizing Bayesian evidence
-    through greedy elimination of features
+    Backward evidence-based sparse regression for SINDy.
 
-    This optimizer performs backward model selection
-    (i.e.feature elimination) driven by the
+    This optimizer performs backward feature elimination driven by the
     Bayesian log evidence for a linear Gaussian model with an isotropic
-    Gaussian prior on the coefficients. For each target dimension y_{tgt},
-    we assume
+    Gaussian prior on the coefficients.
 
-    .. math::
+    Shared-support multi-trajectory fitting
+    ---------------------------------------
+    When ``trajectory_lengths`` and ``trajectory_sigma2s`` are passed to
+    ``fit(..., shared_support=True)``, the optimizer no
+    longer treats concatenated trajectories as a single regression problem.
+    Instead, it performs *shared-support, trajectory-specific-coefficient*
+    model selection:
 
-        w &\sim \mathcal{N}\!\left(0,\ \alpha^{-1} I\right), \\
-        y_{tgt} \mid w &\sim \mathcal{N}\!\left(\Theta w,\ \sigma^2 I\right),
+    * the active term set is shared across trajectories;
+    * each trajectory retains its own MAP coefficients;
+    * candidate removals are ranked by the sum of per-trajectory log evidences.
 
-    where ``alpha`` is the prior precision on the coefficients
-    (sigma_p^{-2}) and ``_sigma2`` is the observation noise variance
-    (sigma^2).
-
-    The algorithm:
-
-    #. Start from the full support (all library terms active).
-    #. At each step, temporarily remove each active term in turn.
-    #. For each candidate support, compute the Bayesian log evidence
-       :math:`\log p(y_{tgt} \mid \alpha, \sigma^2, \mathrm{support})` using the
-       precomputed statistics :math:`G=\Theta^\top\Theta` and
-       :math:`b_{tgt}=\Theta^\top y_{tgt}`.
-    #. Accept the removal that yields the largest increase in evidence.
-    #. Stop when no single removal increases the evidence.
-
-
-
-    Parameters
-    ----------
-    alpha : float, default=1.0
-        Prior precision on the coefficients (sigma_p^{-2}). Must be positive.
-        The prior is defined in the feature space actually used by the
-        optimizer. In particular, when ``normalize_columns=True``, ``alpha``
-        controls an isotropic Gaussian prior on the coefficients in the
-        normalized library. Changing ``normalize_columns`` without retuning
-        ``alpha`` will generally change the effective strength of the
-        regularization.
-
-    _sigma2 : float, default= (float precision**2)
-        Observation noise variance (sigma^2). Must be positive.
-
-    max_iter : int or None
-        Maximum number of elimination steps. If None, at most n_features - 1
-        removals are allowed.
-
-    normalize_columns : bool, default=True
-        Passed to :class:`~pysindy.optimizers.base.BaseOptimizer`.
-        If True, BOTH the columns of the library matrix and the target
-        variables are normalized before regression. The Bayesian prior
-        and ridge penalty are then applied in this normalized space. The
-        learned coefficients are mapped back to the original scale when
-        stored in ``coef_``.
-
-        Note that when ``normalize_columns=True``, ``alpha`` is typically of
-        order 1.0.
-
-    copy_X : bool, default=True
-        Passed to :class:`~pysindy.optimizers.base.BaseOptimizer`. If True,
-        input data are copied.
-
-    initial_guess : array-like of shape (n_targets, n_features) or None, \
-            default=None
-        Currently ignored by the greedy algorithm; present for API compatibility
-        with :class:`~pysindy.optimizers.base.BaseOptimizer`.
-
-    unbias : bool, default=False
-        Whether to perform an additional unregularized refit after support
-        selection. For a Bayesian evidence interpretation the regularized
-        posterior mean is natural, so the default is False.
-
-    verbose : bool, default=False
-        If True, prints a short trace of evidence values during backward
-        elimination for each target dimension.
-
-    Attributes
-    ----------
-    coef_ : ndarray of shape (n_targets, n_features)
-        Final coefficient matrix Xi. Row i contains the coefficients for
-        the i-th target variable, with zeros outside the selected support.
-
-    ind_ : ndarray of bool of shape (n_targets, n_features)
-        Boolean support mask corresponding to ``coef_``. ``ind_[i, tgt]`` is
-        True if the tgt-th library function is active in the equation for the
-        i-th target.
-
-    history_ : list of ndarray
-        Minimal coefficient history kept for compatibility with other
-        optimizers. By convention ``history_[-1]`` is the final coefficient
-        matrix ``coef_``.
-
-    evidence_history_ : list of list of dict
-        Per-target evidence traces. ``evidence_history_[i]`` is a list of
-        dictionaries recording the support size and log evidence at each
-        backward-elimination step for the i-th target, e.g.::
-
-            {"step": k,
-             "removed": tgt,
-             "support_size": (number of active features after removal),
-             "log_evidence": value}
-
-    Examples
-    --------
-
-    >>> import numpy as np
-    >>> from scipy.integrate import odeint
-    >>> from pysindy import SINDy
-    >>> from pysindy.optimizers import EvidenceGreedy
-    >>>
-    >>> # Lorenz system
-    >>> lorenz = lambda z, t: [
-    ...     10 * (z[1] - z[0]),
-    ...     z[0] * (28 - z[2]) - z[1],
-    ...     z[0] * z[1] - 8 / 3 * z[2],
-    ... ]
-    >>> t = np.arange(0, 10, 0.01)
-    >>> x = odeint(lorenz, [-8, 8, 27], t)
-    >>>
-    >>> # Add noise to the measurements
-    >>> sigma_x = 1e-2
-    >>> x = x + sigma_x * np.random.normal(size=x.shape)
-    >>>
-    >>> opt = EvidenceGreedy(alpha=1e-6, max_iter=20, normalize_columns=False)
-    >>> model = BINDy(optimizer=opt)
-    >>> model.fit(x, t=t[1] - t[0])
-    >>> model.print()
-
-    Example output::
-
-        (x0)' = -9.979 x0 + 9.980 x1
-        (x1)' = 27.807 x0 - 0.963 x1 - 0.995 x0 x2
-        (x2)' = -2.658 x2 + 0.997 x0 x1
-
+    For API compatibility, the public ``coef_`` stored on the optimizer is a
+    pooled MAP refit on the final shared support, while the trajectory-specific
+    MAP coefficients are exposed in ``coef_trajectories_``.
     """
 
     def __init__(
@@ -161,23 +50,19 @@ class EvidenceGreedy(BaseOptimizer):
         unbias: bool = False,
         verbose: bool = False,
     ):
-        if max_iter is not None and max_iter <= 0:
-            raise ValueError("max_iter must be positive or None.")
         if alpha <= 0:
             raise ValueError("alpha must be positive.")
         if _sigma2 <= 0:
             raise ValueError("_sigma2 (noise variance) must be positive.")
 
-        # Treat max_iter=None as no limit, but BaseOptimizer requires a positive int
         if max_iter is None:
             max_iter = sys.maxsize
         elif max_iter <= 0:
-            raise ValueError("max_iter must be a positive integer or None")
+            raise ValueError("max_iter must be a positive integer or None.")
 
         self.alpha = float(alpha)
         self._sigma2 = float(_sigma2)
         self.verbose = bool(verbose)
-        self.max_iter = max_iter
 
         super().__init__(
             max_iter=max_iter,
@@ -187,164 +72,400 @@ class EvidenceGreedy(BaseOptimizer):
             unbias=unbias,
         )
 
-    def _reduce(self, x: np.ndarray, y: np.ndarray) -> None:
+    @staticmethod
+    def TemporalNoisePropagation(
+        differentiator,
+        t,
+        sigma_x: float,
+    ) -> float:
         """
-        Run backward evidence selection for each target dimension.
+        Estimate the derivative noise variance ``_sigma2`` induced by a
+        finite-difference differentiator.
 
-        Parameters
-        ----------
-        x : ndarray of shape (n_samples, n_features)
-            Library matrix Theta(X). This has already been preprocessed
-            by BaseOptimizer (and may be normalized).
-
-        y : ndarray of shape (n_samples, n_targets)
-            Target derivatives.
-
+        This reconstructs the linear differentiation operator by applying the
+        differentiator to the identity matrix and averages the induced row-wise
+        derivative noise variance.
         """
 
-        # Getting dimensions
+        t = np.asarray(t)
+        if t.ndim != 1:
+            raise ValueError("t must be a 1D time grid.")
+        if sigma_x < 0:
+            raise ValueError("sigma_x must be non-negative.")
+
+        n_samples = t.shape[0]
+        X_probe = np.eye(n_samples, dtype=float)
+        L_dt = differentiator._differentiate(X_probe, t)
+
+        if L_dt.shape != (n_samples, n_samples):
+            raise RuntimeError(
+                "Unexpected shape from differentiator._differentiate; "
+                f"expected ({n_samples}, {n_samples}), got {L_dt.shape}."
+            )
+
+        finite_row_mask = np.all(np.isfinite(L_dt), axis=1)
+        if not np.any(finite_row_mask):
+            raise RuntimeError(
+                "Could not find any rows of the finite-difference operator "
+                "without NaNs; check differentiator settings."
+            )
+
+        row_norm_sq = np.sum(L_dt[finite_row_mask] ** 2, axis=1)
+        factor = float(np.mean(row_norm_sq))
+        return float(sigma_x**2 * factor)
+
+    def _unbias(self, x: np.ndarray, y: np.ndarray) -> None:
+        """
+        Optional unregularized refit on the selected support.
+
+        For shared-support multi-trajectory fitting, ``coef_`` is the
+        pooled/public coefficient matrix. If ``unbias=True``, only this public
+        pooled coefficient matrix is unregularized; ``coef_trajectories_``
+        remains the trajectory-wise MAP estimate.
+        """
+        x = np.asarray(x)
+        y = np.asarray(y)
+
+        if y.ndim == 1:
+            y = y.reshape(-1, 1)
+
+        _, n_features = x.shape
+        _, n_targets = y.shape
+
+        if self.coef_.shape != (n_targets, n_features):
+            raise RuntimeError(
+                "EvidenceGreedy._unbias: unexpected coef_ shape "
+                f"{self.coef_.shape}, expected {(n_targets, n_features)}."
+            )
+
+        for i in range(n_targets):
+            active_mask = self.ind_[i]
+            if not np.any(active_mask):
+                continue
+
+            X_active = x[:, active_mask]
+            y_i = y[:, i]
+            optvar = LinearRegression(fit_intercept=False).fit(X_active, y_i).coef_
+            self.coef_[i, active_mask] = optvar
+
+    def _reduce(
+        self,
+        x: np.ndarray,
+        y: np.ndarray,
+        trajectory_lengths: Iterable[int] | None = None,
+        trajectory_sigma2s: Iterable[float] | None = None,
+        shared_support: bool = False,
+    ) -> None:
+        """
+        Run backward evidence selection.
+
+        Single-trajectory behaviour is unchanged.
+
+        ``trajectory_lengths`` and ``trajectory_sigma2s`` are internal keyword
+        arguments passed by ``BINDy.fit`` when ``shared_support=True``. Users
+        should not provide these manually when using ``BINDy``. They are used
+        only so the optimizer can split the concatenated feature and target
+        matrices back into trajectory blocks for shared-support evidence
+        selection.
+        """
+        x = np.asarray(x)
+        y = np.asarray(y)
+
+        if y.ndim == 1:
+            y = y.reshape(-1, 1)
+
+        trajectory_lengths_list = (
+            None if trajectory_lengths is None else list(trajectory_lengths)
+        )
+        if shared_support and trajectory_lengths_list is None:
+            raise ValueError(
+                "trajectory_lengths must be provided internally when "
+                "shared_support=True."
+            )
+        if (
+            shared_support
+            and trajectory_lengths_list is not None
+            and len(trajectory_lengths_list) <= 1
+        ):
+            warnings.warn(
+                "shared_support=True was requested, but only one trajectory was "
+                "provided. Falling back to ordinary single-trajectory fitting. "
+                "Pass a list of two or more trajectories to BINDy.fit to enable "
+                "shared-support multi-trajectory selection.",
+                UserWarning,
+            )
+
+        use_shared_support_multi_trajectory = (
+            shared_support
+            and trajectory_lengths_list is not None
+            and len(trajectory_lengths_list) > 1
+        )
+
+        if use_shared_support_multi_trajectory:
+            self._reduce_multi_trajectory_shared_support(
+                x=x,
+                y=y,
+                trajectory_lengths=trajectory_lengths_list,
+                trajectory_sigma2s=trajectory_sigma2s,
+            )
+            return
+
+        self._reduce_single_trajectory(x=x, y=y)
+
+    def _reduce_single_trajectory(self, x: np.ndarray, y: np.ndarray) -> None:
+        """Original single-trajectory / stacked-data behaviour."""
+        x = np.asarray(x)
+        y = np.asarray(y)
+
         n_samples, n_features = x.shape
+        if y.ndim == 1:
+            y = y.reshape(-1, 1)
         n_targets = y.shape[1]
 
-        # Numerical precision threshold for treating norms as zero.
-        # Also used to prevent division by zero in when
-        # normalizing sigma2 to sigma2_scaled.
-        eps_precision = float(np.finfo(float).eps)
-
-        # BaseOptimizer only normalise the library, but for the Bayesian
-        # framework, we also need to normalize the targets.
-        # Normalising this help make sure the parameter
-        # is also rescaled to unit order.
-        y_norm, y_normalised = _normalize_features(y)
         if self.normalize_columns:
-            y = y_normalised
-            # Since y is normalized, y^T y = n_samples
-            yTy_all = np.ones(n_features, dtype=float)
-        else:
-            yTy_all = y_norm**2.0
+            y_norm, y = _normalize_features(y)
 
-        # Shared Gram matrix and RHS for all outputs:
-        G = x.T @ x  # (n_features, n_features) = Theta^T Theta
-        B = x.T @ y  # (n_features, N) = Theta^T Y
+        G = x.T @ x
+        B = x.T @ y
+        yTy_all = np.sum(y**2, axis=0)
 
         coef = np.zeros((n_targets, n_features), dtype=float)
         ind = np.zeros((n_targets, n_features), dtype=bool)
-        self.evidence_history_: list[list[dict[str, float]]] = []
+        all_histories: list[list[dict[str, float]]] = []
 
-        for tgt in range(n_targets):
-            b = B[:, tgt]  # (n_features,)
-            yTy = float(yTy_all[tgt])  # scalar
+        for j in range(n_targets):
+            b = B[:, j]
+            yTy = float(yTy_all[j])
 
-            # In case y is a zero vector or close to it,
-            # output as an empty model.
-            if y_norm[tgt] ** 2.0 <= eps_precision:
-                coef[tgt, :] = 0.0
-                ind[tgt, :] = False
-
-                # Log evidence of the empty model (n_features=0).
-                # m_N is ignored for n_features=0.
-                log_ev = _log_evidence_laplace_appx(
-                    G=np.zeros((0, 0), dtype=float),
-                    b=np.zeros((0,), dtype=float),
+            eps = float(np.finfo(float).eps)
+            if (not np.isfinite(yTy)) or (yTy <= eps):
+                coef[j, :] = 0.0
+                ind[j, :] = False
+                log_ev = _log_evidence_from_G(
+                    G_active=np.zeros((0, 0), dtype=float),
+                    b_active=np.zeros((0,), dtype=float),
                     yTy=yTy,
                     n_samples=n_samples,
                     alpha=self.alpha,
                     _sigma2=float(self._sigma2),
                     m_N=None,
                 )
-                history_tgt = [
+                history_j = [
                     {
                         "step": 0,
                         "support_size": 0,
                         "log_evidence": float(log_ev),
                     }
                 ]
-                self.evidence_history_.append(history_tgt)
-
-                # Consistent history_ format
+                all_histories.append(history_j)
                 history_tmp = np.full((n_targets, n_features), np.nan, dtype=float)
-                history_tmp[tgt, :] = 0.0
+                history_tmp[j, :] = 0.0
                 self.history_.append(history_tmp)
                 continue
 
-            # Since the target (Y) is also possibly normalized,
-            # we need to rescale _sigma2 accordingly.
-
             if self.normalize_columns:
-                yn = float(y_norm[tgt])
-                # Prevent division by zero / inf
-                denom = max(yn * yn, eps_precision)
-                sigma2_scaled = float(self._sigma2) / denom
+                yn = float(y_norm[j])
+                denom = max(yn * yn, eps)
+                _sigma2_ = float(self._sigma2) / denom
             else:
-                sigma2_scaled = float(self._sigma2)
+                _sigma2_ = float(self._sigma2)
 
-            (
-                coef_tgt,
-                ind_tgt,
-                history_tgt,
-                coef_hist,
-            ) = _backward_evidence_greedy_single(
+            coef_j, ind_j, history_j, coef_hist = _backward_evidence_greedy_single(
                 x=x,
-                y_col=y[:, tgt],
+                y_col=y[:, j],
                 G=G,
                 b=b,
                 yTy=yTy,
                 n_samples=n_samples,
                 alpha=self.alpha,
-                _sigma2=sigma2_scaled,
+                _sigma2=_sigma2_,
                 max_iter=self.max_iter,
                 verbose=self.verbose,
             )
 
-            coef[tgt, :] = coef_tgt
-            ind[tgt, :] = ind_tgt
-            self.evidence_history_.append(history_tgt)
+            coef[j, :] = coef_j
+            ind[j, :] = ind_j
+            all_histories.append(history_j)
 
-            # For history, we need to reshape to match the format of other optimizers.
             for i in range(np.shape(coef_hist)[1]):
                 history_tmp = np.full((n_targets, n_features), np.nan, dtype=float)
-                history_tmp[tgt, :] = coef_hist[:, i]
+                history_tmp[j, :] = coef_hist[:, i]
                 self.history_.append(history_tmp)
 
         self.coef_ = coef
         self.ind_ = ind
 
-        # Map coefficients back to original scale if normalized.
         if self.normalize_columns:
             self.coef_ = self.coef_ * y_norm.reshape(-1, 1)
 
+        self.evidence_history_ = all_histories
+        self.shared_support_ = False
+        self.multi_trajectory_mode_ = "stacked"
+
+    def _reduce_multi_trajectory_shared_support(
+        self,
+        x: np.ndarray,
+        y: np.ndarray,
+        trajectory_lengths: list[int],
+        trajectory_sigma2s: Iterable[float] | None,
+    ) -> None:
+        """
+        Shared-support multi-trajectory support selection.
+
+        The support-elimination score for a candidate support ``S`` is
+
+            sum_i log p(y_i | Theta_i, S, alpha, sigma_i^2),
+
+        where each trajectory gets its own posterior mean / MAP coefficients.
+
+        For API compatibility, the public ``coef_`` is a pooled MAP refit on the
+        final shared support. The trajectory-specific MAP coefficients are stored
+        in ``coef_trajectories_`` with shape
+        ``(n_trajectories, n_targets, n_features)``.
+        """
+        x = np.asarray(x)
+        y = np.asarray(y)
+        n_samples, n_features = x.shape
+        n_targets = y.shape[1]
+
+        lengths, sigma2s = _validate_trajectory_info(
+            n_samples=n_samples,
+            trajectory_lengths=trajectory_lengths,
+            trajectory_sigma2s=trajectory_sigma2s,
+            default_sigma2=float(self._sigma2),
+        )
+        n_trajectories = len(lengths)
+
+        if self.normalize_columns:
+            y_norm, y = _normalize_features(y)
+        else:
+            y_norm = np.ones(n_targets, dtype=float)
+
+        x_list = _split_by_lengths(x, lengths)
+        y_list = _split_by_lengths(y, lengths)
+        G_list = [xi.T @ xi for xi in x_list]
+        B_list = [xi.T @ yi for xi, yi in zip(x_list, y_list, strict=True)]
+        yTy_list = [np.sum(yi**2, axis=0) for yi in y_list]
+        n_list = [int(xi.shape[0]) for xi in x_list]
+
+        coef = np.zeros((n_targets, n_features), dtype=float)
+        coef_trajectories = np.zeros(
+            (n_trajectories, n_targets, n_features), dtype=float
+        )
+        ind = np.zeros((n_targets, n_features), dtype=bool)
+        all_histories: list[list[dict[str, float]]] = []
+
+        eps = float(np.finfo(float).eps)
+        base_sigma2s = np.asarray(sigma2s, dtype=float)
+
+        for j in range(n_targets):
+            total_yTy = float(sum(yTy_j[j] for yTy_j in yTy_list))
+            if (not np.isfinite(total_yTy)) or (total_yTy <= eps):
+                coef[j, :] = 0.0
+                ind[j, :] = False
+                coef_trajectories[:, j, :] = 0.0
+                history_j = [
+                    {
+                        "step": 0,
+                        "support_size": 0,
+                        "log_evidence": float(
+                            sum(
+                                _log_evidence_from_G(
+                                    G_active=np.zeros((0, 0), dtype=float),
+                                    b_active=np.zeros((0,), dtype=float),
+                                    yTy=float(yTy_i[j]),
+                                    n_samples=int(n_i),
+                                    alpha=self.alpha,
+                                    _sigma2=float(s2),
+                                    m_N=None,
+                                )
+                                for yTy_i, n_i, s2 in zip(
+                                    yTy_list, n_list, base_sigma2s, strict=True
+                                )
+                            )
+                        ),
+                    }
+                ]
+                all_histories.append(history_j)
+                history_tmp = np.full((n_targets, n_features), np.nan, dtype=float)
+                history_tmp[j, :] = 0.0
+                self.history_.append(history_tmp)
+                continue
+
+            denom = max(float(y_norm[j]) ** 2, eps)
+            sigma2s_j = base_sigma2s / denom
+
+            b_list_j = [Bi[:, j] for Bi in B_list]
+            yTy_list_j = [float(yTy_i[j]) for yTy_i in yTy_list]
+
+            (
+                coef_j,
+                coef_traj_j,
+                ind_j,
+                history_j,
+                coef_hist_j,
+            ) = _backward_evidence_greedy_shared_support_single(
+                G_list=G_list,
+                b_list=b_list_j,
+                yTy_list=yTy_list_j,
+                n_samples_list=n_list,
+                alpha=self.alpha,
+                sigma2_list=sigma2s_j,
+                max_iter=self.max_iter,
+                verbose=self.verbose,
+            )
+
+            coef[j, :] = coef_j
+            coef_trajectories[:, j, :] = coef_traj_j
+            ind[j, :] = ind_j
+            all_histories.append(history_j)
+
+            for hist_col in range(coef_hist_j.shape[1]):
+                history_tmp = np.full((n_targets, n_features), np.nan, dtype=float)
+                history_tmp[j, :] = coef_hist_j[:, hist_col]
+                self.history_.append(history_tmp)
+
+        self.coef_ = coef
+        self.coef_trajectories_ = coef_trajectories
+        self.ind_ = ind
+
+        if self.normalize_columns:
+            scale = y_norm.reshape(-1, 1)
+            self.coef_ = self.coef_ * scale
+            self.coef_trajectories_ = (
+                self.coef_trajectories_ * y_norm.reshape(1, -1, 1)
+            )
+
+        self.evidence_history_ = all_histories
+        self.trajectory_sigma2s_ = base_sigma2s
+        self.trajectory_lengths_ = np.asarray(lengths, dtype=int)
+        self.shared_support_ = True
+        self.multi_trajectory_mode_ = "shared_support"
+
+
+# -----------------------------------------------------------------------------
+# Single-trajectory helpers (existing behaviour)
+# -----------------------------------------------------------------------------
+
 
 def _ridge_map(
-    X: np.ndarray,
-    y: np.ndarray,
+    X_active: np.ndarray,
+    y_active: np.ndarray,
     alpha_prior: float,
     _sigma2: float,
     ridge_kw: dict | None = None,
 ) -> np.ndarray:
-    """
-    Compute the MAP coefficients for a given active set using ridge regression.
-
-    This solves the ridge problem
-
-        argmin_w ||y - X w||^2 + lambda ||w||^2,
-
-    where lambda = alpha_prior * _sigma2, corresponding to a Gaussian
-    prior w ~ N(0, alpha_prior^{-1} I) and noise variance _sigma2.
-
-    Any LinAlgWarning raised by the underlying solver is converted into a
-    RuntimeWarning, but the returned coefficients are still used.
-
-    """
+    """Compute the MAP coefficients for a given active set using ridge."""
+    X_active = np.asarray(X_active)
+    y_active = np.asarray(y_active).ravel()
 
     lam = alpha_prior * _sigma2
     kw = ridge_kw or {}
 
-    # Follow the STLSQ pattern: use ridge_regression and handle LinAlgWarning.
     with warnings.catch_warnings(record=True) as caught:
         warnings.filterwarnings("always", category=LinAlgWarning)
-        coef = ridge_regression(X, y, lam, **kw)
+        coef = ridge_regression(X_active, y_active, lam, **kw)
 
-    # If any LinAlgWarning occurred, surface a warning to the user but continue.
     for w in caught:
         if issubclass(w.category, LinAlgWarning):
             warnings.warn(
@@ -357,100 +478,382 @@ def _ridge_map(
     return coef
 
 
-def _log_evidence_laplace_appx(
-    G: np.ndarray,
-    b: np.ndarray,
+# -----------------------------------------------------------------------------
+# Shared-support multi-trajectory helpers
+# -----------------------------------------------------------------------------
+
+
+def _validate_trajectory_info(
+    n_samples: int,
+    trajectory_lengths: list[int],
+    trajectory_sigma2s: Iterable[float] | None,
+    default_sigma2: float,
+) -> tuple[list[int], np.ndarray]:
+    """Validate trajectory partition and noise list."""
+    if trajectory_lengths is None or len(trajectory_lengths) == 0:
+        raise ValueError(
+            "trajectory_lengths must be provided internally by BINDy.fit when "
+            "shared_support=True. When using BINDy, pass multiple trajectories "
+            "as a list of arrays rather than one concatenated array."
+        )
+
+    lengths = [int(v) for v in trajectory_lengths]
+    if any(v <= 0 for v in lengths):
+        raise ValueError("All trajectory lengths must be positive integers.")
+    if sum(lengths) != int(n_samples):
+        raise ValueError(
+            "trajectory_lengths must sum to the concatenated sample count. "
+            f"Expected {n_samples}, got {sum(lengths)}."
+        )
+
+    if trajectory_sigma2s is None:
+        sigma2s = np.full(len(lengths), float(default_sigma2), dtype=float)
+    else:
+        sigma2s = np.asarray(list(trajectory_sigma2s), dtype=float)
+        if sigma2s.ndim != 1 or sigma2s.shape[0] != len(lengths):
+            raise ValueError(
+                "trajectory_sigma2s must be a 1D iterable with the same length "
+                "as trajectory_lengths."
+            )
+        if np.any(~np.isfinite(sigma2s)) or np.any(sigma2s <= 0):
+            raise ValueError("All trajectory_sigma2s must be finite and positive.")
+
+    return lengths, sigma2s
+
+
+def _split_by_lengths(arr: np.ndarray, lengths: list[int]) -> list[np.ndarray]:
+    """Split a concatenated array into consecutive trajectory blocks."""
+    arr = np.asarray(arr)
+    parts = []
+    start = 0
+    for n in lengths:
+        stop = start + int(n)
+        parts.append(arr[start:stop])
+        start = stop
+    return parts
+
+
+def _ridge_map_from_stats(
+    G_active: np.ndarray,
+    b_active: np.ndarray,
+    alpha_prior: float,
+    _sigma2: float,
+) -> np.ndarray:
+    """
+    MAP coefficients from sufficient statistics.
+
+    Solves
+        (G + alpha * sigma^2 * I) m = b.
+    """
+    G_active = np.asarray(G_active, dtype=float)
+    b_active = np.asarray(b_active, dtype=float).reshape(-1)
+
+    K = G_active.shape[0]
+    if K == 0:
+        return np.zeros((0,), dtype=float)
+
+    A = G_active + (alpha_prior * _sigma2) * np.eye(K)
+    try:
+        return np.linalg.solve(A, b_active)
+    except np.linalg.LinAlgError:
+        warnings.warn(
+            "EvidenceGreedy: singular/ill-conditioned normal system in "
+            "_ridge_map_from_stats; falling back to least squares.",
+            RuntimeWarning,
+        )
+        return np.linalg.lstsq(A, b_active, rcond=None)[0]
+
+
+def _pooled_map_shared_support_coefficients(
+    active_mask: np.ndarray,
+    G_list: list[np.ndarray],
+    b_list: list[np.ndarray],
+    sigma2_list: np.ndarray,
+    alpha: float,
+) -> np.ndarray:
+    """Compute public pooled MAP coefficients on the final shared support."""
+    M = G_list[0].shape[0]
+    J = np.where(active_mask)[0]
+    coef_full = np.zeros(M, dtype=float)
+
+    if J.size == 0:
+        return coef_full
+
+    A = alpha * np.eye(J.size)
+    h = np.zeros(J.size, dtype=float)
+
+    for G_i, b_i, sigma2_i in zip(G_list, b_list, sigma2_list, strict=True):
+        beta_i = 1.0 / float(sigma2_i)
+        A += beta_i * G_i[np.ix_(J, J)]
+        h += beta_i * b_i[J]
+
+    try:
+        m = np.linalg.solve(A, h)
+    except np.linalg.LinAlgError:
+        warnings.warn(
+            "EvidenceGreedy: singular pooled MAP system in shared-support "
+            "aggregation; falling back to least squares.",
+            RuntimeWarning,
+        )
+        m = np.linalg.lstsq(A, h, rcond=None)[0]
+
+    coef_full[J] = m
+    return coef_full
+
+
+def _backward_evidence_greedy_shared_support_single(
+    G_list: list[np.ndarray],
+    b_list: list[np.ndarray],
+    yTy_list: list[float],
+    n_samples_list: list[int],
+    alpha: float,
+    sigma2_list: np.ndarray,
+    max_iter: int,
+    verbose: bool = False,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, list[dict[str, float]], np.ndarray]:
+    """
+    Shared-support multi-trajectory support search for a single output dimension.
+
+    Shared support is selected by maximizing the *sum* of per-trajectory log
+    evidences, while each trajectory keeps its own MAP coefficients.
+
+    Returns
+    -------
+    coef_public : ndarray, shape (M,)
+        Public/predictive coefficient vector. In this branch it is a pooled MAP
+        refit on the final shared support.
+    coef_trajectories : ndarray, shape (n_trajectories, M)
+        Trajectory-specific MAP coefficients on the final shared support.
+    active_mask : ndarray, shape (M,), dtype bool
+        Shared support mask.
+    history : list of dict
+        Evidence trace with total and per-trajectory evidence values.
+    coef_hist : ndarray, shape (M, n_steps_recorded)
+        History of the pooled/public coefficient vector.
+    """
+    if len(G_list) == 0:
+        raise ValueError("At least one trajectory is required.")
+
+    M = G_list[0].shape[0]
+    n_trajectories = len(G_list)
+    if (
+        len(b_list) != n_trajectories
+        or len(yTy_list) != n_trajectories
+        or len(n_samples_list) != n_trajectories
+    ):
+        raise ValueError("Trajectory statistics lists must all have equal length.")
+
+    active = np.ones(M, dtype=bool)
+    history: list[dict[str, float]] = []
+
+    coef_traj_full = np.zeros((n_trajectories, M), dtype=float)
+    log_evs = []
+    for i, (G_i, b_i, yTy_i, n_i, sigma2_i) in enumerate(
+        zip(G_list, b_list, yTy_list, n_samples_list, sigma2_list, strict=True)
+    ):
+        m_i = _ridge_map_from_stats(
+            G_i, b_i, alpha_prior=alpha, _sigma2=float(sigma2_i)
+        )
+        coef_traj_full[i, :] = m_i
+        log_ev_i = _log_evidence_from_G(
+            G_active=G_i,
+            b_active=b_i,
+            yTy=float(yTy_i),
+            n_samples=int(n_i),
+            alpha=alpha,
+            _sigma2=float(sigma2_i),
+            m_N=m_i,
+        )
+        log_evs.append(float(log_ev_i))
+
+    best_log_ev = float(np.sum(log_evs))
+    best_coef_traj = coef_traj_full.copy()
+    best_active = active.copy()
+    best_coef_public = _pooled_map_shared_support_coefficients(
+        active_mask=best_active,
+        G_list=G_list,
+        b_list=b_list,
+        sigma2_list=sigma2_list,
+        alpha=alpha,
+    )
+
+    if verbose:
+        print(
+            "[EvidenceGreedy][shared_support] start: "
+            f"support={np.count_nonzero(active)}, "
+            f"log_evidence_total={best_log_ev:.3f}"
+        )
+
+    history.append(
+        {
+            "step": 0,
+            "support_size": int(np.count_nonzero(active)),
+            "log_evidence": float(best_log_ev),
+            "log_evidence_per_trajectory": [float(v) for v in log_evs],
+        }
+    )
+
+    coef_hist = [best_coef_public.copy()]
+    n_steps_max = min(max_iter, max(M - 1, 0))
+
+    for step in range(1, n_steps_max + 1):
+        active_indices = np.where(active)[0]
+        if active_indices.size <= 1:
+            break
+
+        best_step_log_ev = -np.inf
+        best_step_idx: int | None = None
+        best_step_coef_traj: np.ndarray | None = None
+        best_step_per_traj_logs: list[float] | None = None
+
+        for idx in active_indices:
+            mask_candidate = active.copy()
+            mask_candidate[idx] = False
+            J = np.where(mask_candidate)[0]
+
+            cand_coef_traj = np.zeros((n_trajectories, M), dtype=float)
+            cand_logs = []
+
+            for traj_i, (G_i, b_i, yTy_i, n_i, sigma2_i) in enumerate(
+                zip(G_list, b_list, yTy_list, n_samples_list, sigma2_list, strict=True)
+            ):
+                if J.size == 0:
+                    log_ev_i = _log_evidence_from_G(
+                        G_active=np.zeros((0, 0), dtype=float),
+                        b_active=np.zeros((0,), dtype=float),
+                        yTy=float(yTy_i),
+                        n_samples=int(n_i),
+                        alpha=alpha,
+                        _sigma2=float(sigma2_i),
+                        m_N=None,
+                    )
+                else:
+                    G_J = G_i[np.ix_(J, J)]
+                    b_J = b_i[J]
+                    m_J = _ridge_map_from_stats(
+                        G_active=G_J,
+                        b_active=b_J,
+                        alpha_prior=alpha,
+                        _sigma2=float(sigma2_i),
+                    )
+                    log_ev_i = _log_evidence_from_G(
+                        G_active=G_J,
+                        b_active=b_J,
+                        yTy=float(yTy_i),
+                        n_samples=int(n_i),
+                        alpha=alpha,
+                        _sigma2=float(sigma2_i),
+                        m_N=m_J,
+                    )
+                    cand_coef_traj[traj_i, J] = m_J
+
+                cand_logs.append(float(log_ev_i))
+
+            log_ev_total = float(np.sum(cand_logs))
+            if log_ev_total > best_step_log_ev:
+                best_step_log_ev = log_ev_total
+                best_step_idx = int(idx)
+                best_step_coef_traj = cand_coef_traj
+                best_step_per_traj_logs = cand_logs
+
+        if best_step_idx is None or best_step_log_ev <= best_log_ev:
+            if verbose:
+                print(
+                    f"[EvidenceGreedy][shared_support] stop at step {step}: "
+                    f"no evidence improvement (current={best_log_ev:.3f}, "
+                    f"best_candidate={best_step_log_ev:.3f})"
+                )
+            break
+
+        active[best_step_idx] = False
+        best_log_ev = float(best_step_log_ev)
+        best_coef_traj = best_step_coef_traj.copy()
+        best_active = active.copy()
+        best_coef_public = _pooled_map_shared_support_coefficients(
+            active_mask=best_active,
+            G_list=G_list,
+            b_list=b_list,
+            sigma2_list=sigma2_list,
+            alpha=alpha,
+        )
+        coef_hist.append(best_coef_public.copy())
+
+        if verbose:
+            print(
+                (
+                    f"[EvidenceGreedy][shared_support] step {step}: removed term "
+                    f"{best_step_idx}, "
+                    f"support={np.count_nonzero(active)}, "
+                    f"log_evidence_total={best_log_ev:.3f}"
+                )
+            )
+
+        history.append(
+            {
+                "step": step,
+                "removed": int(best_step_idx),
+                "support_size": int(np.count_nonzero(active)),
+                "log_evidence": float(best_log_ev),
+                "log_evidence_per_trajectory": [
+                    float(v) for v in best_step_per_traj_logs
+                ],
+            }
+        )
+
+    return (
+        best_coef_public,
+        best_coef_traj,
+        best_active,
+        history,
+        np.column_stack(coef_hist),
+    )
+
+
+# -----------------------------------------------------------------------------
+# Shared utility functions
+# -----------------------------------------------------------------------------
+
+
+def _log_evidence_from_G(
+    G_active: np.ndarray,
+    b_active: np.ndarray,
     yTy: float,
     n_samples: int,
     alpha: float,
     _sigma2: float,
     m_N: np.ndarray | None,
 ) -> float:
-    r"""
-    Compute the Bayesian log evidence for a given active set and posterior mean.
+    r"""Compute the Bayesian log evidence for a given active set and MAP."""
+    G_active = np.asarray(G_active)
+    b_active = np.asarray(b_active)
 
-    Evidence approximation:
+    K = G_active.shape[0]
 
-        log p(y) =
-            -1/2 [ n_samples log(2 pi) + n_samples log _sigma2
-                   + log|Lambda| - n_features log alpha
-                   + ||y - Theta m_N||^2 / _sigma2
-                   + alpha ||m_N||^2 ]
-
-    where
-
-        ||y - Theta m_N||^2
-            = yTy - 2 m_N^T b + m_N^T G m_N
-
-    and
-
-        Lambda = alpha I_(n_features) + G / _sigma2
-
-    Parameters
-    ----------
-    G : ndarray, shape (n_features, n_features)
-        Gram matrix for active features
-        (i.e. Theta^T Theta restricted to active features).
-
-    b : ndarray, shape (n_features,)
-        Theta^T y restricted to active features.
-
-    yTy : float
-        y^T y (scalar).
-
-    n_samples : int
-        T, number of time samples.
-
-    alpha : float
-        Prior precision on weights.
-
-    _sigma2 : float
-        Observation noise variance.
-
-    m_N : ndarray of shape (n_features,) or None
-        Posterior mean coefficients for the active set. For the empty
-        model (n_features == 0), this is ignored and may be None.
-
-    Returns
-    -------
-    log_ev : float
-        Bayesian log evidence.
-
-    """
-
-    n_features = G.shape[0]
-
-    # Degenerate empty model: p(y) = N(0, _sigma2 I)
-    if n_features == 0:
+    if K == 0:
         term1 = n_samples * np.log(2.0 * np.pi)
         term2 = n_samples * np.log(_sigma2)
-        term4 = (1.0 / _sigma2) * yTy
-        log_ev = -0.5 * (term1 + term2 + term4)
+        term3 = (1.0 / _sigma2) * yTy
+        log_ev = -0.5 * (term1 + term2 + term3)
         return float(log_ev)
 
     if m_N is None:
         raise ValueError("m_N must be provided for a non-empty active set.")
 
-    # m_N = np.asarray(m_N).reshape(-1)
-    if m_N.shape[0] != n_features:
+    m_N = np.asarray(m_N).reshape(-1)
+    if m_N.shape[0] != K:
         raise ValueError("m_N has incompatible shape for the active set.")
 
     beta = 1.0 / _sigma2
+    residual_sq = yTy - 2.0 * float(m_N.T @ b_active) + float(m_N.T @ (G_active @ m_N))
 
-    # Residual norm using precomputed stats:
-    #   ||y - Theta m_N||^2 = yTy - 2 m_N^T b + m_N^T G m_N
-    residual_sq = yTy - 2.0 * float(m_N.T @ b) + float(m_N.T @ (G @ m_N))
-
-    # log|Lambda|
-    Lambda = alpha * np.eye(n_features) + beta * G
+    Lambda = alpha * np.eye(K) + beta * G_active
     sign, logdet_Lambda = np.linalg.slogdet(Lambda)
     if sign <= 0:
-        # Numerically bad model; treat as very low evidence.
         return float(-np.inf)
 
     term1 = n_samples * np.log(2.0 * np.pi)
     term2 = n_samples * np.log(_sigma2)
-    term3 = logdet_Lambda - n_features * np.log(alpha)
+    term3 = logdet_Lambda - K * np.log(alpha)
     term4 = (1.0 / _sigma2) * residual_sq
     term5 = alpha * float(m_N.T @ m_N)
 
@@ -469,68 +872,29 @@ def _backward_evidence_greedy_single(
     _sigma2: float,
     max_iter: int,
     verbose: bool = False,
-) -> tuple[np.ndarray, np.ndarray, list[dict[str, float]]]:
-    """
-    Backward greedy evidence maximization for a single output dimension.
+) -> tuple[np.ndarray, np.ndarray, list[dict[str, float]], np.ndarray]:
+    """Original single-output, single-problem backward evidence search."""
+    x = np.asarray(x)
+    y_col = np.asarray(y_col).ravel()
+    G = np.asarray(G)
+    b = np.asarray(b)
 
-    Parameters
-    ----------
-    x : ndarray, shape (n_samples, n_features)
-        Library matrix Theta(X) for this regression problem.
+    n_samples_x, M = x.shape
+    if n_samples_x != n_samples:
+        raise ValueError("Mismatch between n_samples and x.shape[0].")
+    if G.shape != (M, M):
+        raise ValueError("G must have shape (M, M).")
+    if b.shape[0] != M:
+        raise ValueError("Dimensions of G and b are inconsistent.")
 
-    y_col : ndarray, shape (n_samples,)
-        Single target column y_{tgt}.
-
-    G : ndarray, shape (n_features, n_features)
-        Full Gram matrix Theta^T Theta.
-
-    b : ndarray, shape (n_features,)
-        Full vector Theta^T y_{tgt}.
-
-    yTy : float
-        Scalar y_{tgt}^T y_{tgt}.
-
-    n_samples : int
-        Number of time samples T.
-
-    alpha : float
-        Prior precision on weights.
-
-    _sigma2 : float
-        Observation noise variance.
-
-    max_iter : int
-        Maximum number of elimination steps. At most n_features - 1 steps are needed.
-
-    verbose : bool, optional (default False)
-        If True, prints a short trace of evidence values.
-
-    Returns
-    -------
-    coef_full : ndarray, shape (n_features,)
-        Final coefficient vector (zeros outside the selected support).
-
-    active_mask : ndarray, shape (n_features,), dtype bool
-        Boolean mask for active features.
-
-    history : list of dict
-        Diagnostics for each step:
-        [{"step": ..., "support_size": ..., "log_evidence": ...}, ...]
-
-    """
-
-    n_samples_x, n_features = x.shape
-
-    # Start with full support
-    active = np.ones(n_features, dtype=bool)
+    active = np.ones(M, dtype=bool)
     history: list[dict[str, float]] = []
 
-    # Initial MAP estimate on the full support
-    m_full = _ridge_map(x[:, active], y_col, alpha_prior=alpha, _sigma2=_sigma2)
-
-    log_ev = _log_evidence_laplace_appx(
-        G=G,
-        b=b,
+    J_full = np.where(active)[0]
+    m_full = _ridge_map(x[:, J_full], y_col, alpha_prior=alpha, _sigma2=_sigma2)
+    log_ev = _log_evidence_from_G(
+        G_active=G,
+        b_active=b,
         yTy=yTy,
         n_samples=n_samples,
         alpha=alpha,
@@ -539,15 +903,14 @@ def _backward_evidence_greedy_single(
     )
 
     best_log_ev = log_ev
-    best_m = np.zeros(n_features, dtype=float)
-    best_m[active] = m_full
+    best_m = np.zeros(M, dtype=float)
+    best_m[J_full] = m_full
     best_active = active.copy()
 
     if verbose:
         print(
-            f"[EvidenceGreedy] start: "
-            f"support={np.count_nonzero(active)}, "
-            f"log_evidence={best_log_ev: .3f}"
+            f"[EvidenceGreedy] start: support={np.count_nonzero(active)}, "
+            f"log_evidence={best_log_ev:.3f}"
         )
 
     history.append(
@@ -558,15 +921,12 @@ def _backward_evidence_greedy_single(
         }
     )
 
-    # At most n_features - 1 removals are possible.
-    # If max_iter is None, perform a full backward elimination
-    # with at most n_features - 1 removals.
     if max_iter is None:
-        n_steps_max = max(n_features - 1, 0)
+        n_steps_max = max(M - 1, 0)
     else:
-        n_steps_max = min(max_iter, max(n_features - 1, 0))
+        n_steps_max = min(max_iter, max(M - 1, 0))
 
-    m_hist = np.zeros((n_features, n_steps_max + 1), dtype=float)
+    m_hist = [best_m.copy()]
 
     for step in range(1, n_steps_max + 1):
         active_indices = np.where(active)[0]
@@ -577,59 +937,65 @@ def _backward_evidence_greedy_single(
         best_step_idx: int | None = None
         best_step_m_full: np.ndarray | None = None
 
-        # Try removing each currently active feature
         for idx in active_indices:
             mask_candidate = active.copy()
             mask_candidate[idx] = False
+            J = np.where(mask_candidate)[0]
 
-            if mask_candidate.sum() == 0:
-                m_N = None
-            else:
-                m_N = _ridge_map(
-                    x[:, mask_candidate], y_col, alpha_prior=alpha, _sigma2=_sigma2
+            if J.size == 0:
+                log_ev_J = _log_evidence_from_G(
+                    G_active=G[np.ix_(J, J)],
+                    b_active=b[J],
+                    yTy=yTy,
+                    n_samples=n_samples,
+                    alpha=alpha,
+                    _sigma2=_sigma2,
+                    m_N=None,
                 )
-                # Evaluate the empty model analytically
-            log_ev_mask = _log_evidence_laplace_appx(
-                G=G[np.ix_(mask_candidate, mask_candidate)],
-                b=b[mask_candidate],
-                yTy=yTy,
-                n_samples=n_samples,
-                alpha=alpha,
-                _sigma2=_sigma2,
-                m_N=m_N,
-            )
-            m_full_candidate = np.zeros(n_features, dtype=float)
-            if mask_candidate.sum() != 0:
-                m_full_candidate[mask_candidate] = m_N
+                m_full_candidate = np.zeros(M, dtype=float)
+            else:
+                G_J = G[np.ix_(J, J)]
+                b_J = b[J]
+                m_J = _ridge_map(x[:, J], y_col, alpha_prior=alpha, _sigma2=_sigma2)
+                log_ev_J = _log_evidence_from_G(
+                    G_active=G_J,
+                    b_active=b_J,
+                    yTy=yTy,
+                    n_samples=n_samples,
+                    alpha=alpha,
+                    _sigma2=_sigma2,
+                    m_N=m_J,
+                )
+                m_full_candidate = np.zeros(M, dtype=float)
+                m_full_candidate[J] = m_J
 
-            if log_ev_mask > best_step_log_ev:
-                best_step_log_ev = log_ev_mask
+            if log_ev_J > best_step_log_ev:
+                best_step_log_ev = log_ev_J
                 best_step_idx = int(idx)
                 best_step_m_full = m_full_candidate
-                m_hist[:, step] = m_full_candidate
 
-        # If no candidate improves evidence, stop
         if best_step_log_ev <= best_log_ev or best_step_idx is None:
             if verbose:
                 print(
-                    f"[EvidenceGreedy] stop at step {step}: "
-                    f"no evidence improvement "
-                    f"(current={best_log_ev: .3f}, "
-                    f"best_candidate={best_step_log_ev: .3f})"
+                    (
+                        f"[EvidenceGreedy] stop at step {step}: no evidence "
+                        f"improvement "
+                        f"(current={best_log_ev:.3f}, "
+                        f"best_candidate={best_step_log_ev:.3f})"
+                    )
                 )
             break
 
-        # Accept the best removal
         active[best_step_idx] = False
         best_log_ev = best_step_log_ev
-        best_m = best_step_m_full  # already full-length (n_features,)
+        best_m = best_step_m_full
         best_active = active.copy()
+        m_hist.append(best_m.copy())
 
         if verbose:
             print(
                 f"[EvidenceGreedy] step {step}: removed term {best_step_idx}, "
-                f"support={np.count_nonzero(active)}, "
-                f"log_evidence={best_log_ev: .3f}"
+                f"support={np.count_nonzero(active)}, log_evidence={best_log_ev:.3f}"
             )
 
         history.append(
@@ -641,4 +1007,4 @@ def _backward_evidence_greedy_single(
             }
         )
 
-    return best_m, best_active, history, m_hist
+    return best_m, best_active, history, np.column_stack(m_hist)
