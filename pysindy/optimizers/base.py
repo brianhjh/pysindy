@@ -170,7 +170,8 @@ class BaseOptimizer(LinearRegression, _BaseOptimizer):
 
     def set_params(self, **kwargs):
         super().set_params(**kwargs)
-        self.__post_init_guard
+        self.__post_init_guard()
+        return self
 
     # Force subclasses to implement this
     @abc.abstractmethod
@@ -239,13 +240,16 @@ class BaseOptimizer(LinearRegression, _BaseOptimizer):
                 )
             self.coef_ = self.initial_guess
 
-        self.history_ = [self.coef_]
+        self.history_ = [self.coef_.copy()]
 
         x_normed = np.asarray(x_normed)
 
         self._reduce(x_normed, y, **reduce_kws)
-        self.ind_ = np.abs(self.coef_) > 1e-14
-
+        if not (
+            getattr(self, "multi_trajectory_mode_", None) == "shared_support"
+            and hasattr(self, "ind_")
+        ):
+            self.ind_ = np.abs(self.coef_) > 1e-14
         if self.unbias:
             self._unbias(x_normed, y)
 
@@ -254,6 +258,10 @@ class BaseOptimizer(LinearRegression, _BaseOptimizer):
             self.coef_ = self.coef_ / feat_norms
             if hasattr(self, "coef_full_"):
                 self.coef_full_ = self.coef_full_ / feat_norms
+            if hasattr(self, "coef_trajectories_"):
+                self.coef_trajectories_ = self.coef_trajectories_ / feat_norms.reshape(
+                    1, 1, -1
+                )
             for i in range(np.shape(self.history_)[0]):
                 self.history_[i] = self.history_[i] / feat_norms
 
@@ -456,4 +464,5 @@ def _drop_random_samples(
 def _normalize_features(x: Float2D) -> Float2D:
     "Calculate the length of vectors and normalize them"
     lengths = np.linalg.norm(x, 2, axis=0)
-    return lengths, x / lengths
+    safe_lengths = np.where(lengths > 0, lengths, 1.0)
+    return lengths, x / safe_lengths

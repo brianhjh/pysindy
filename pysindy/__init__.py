@@ -81,4 +81,5 @@ __all__ = [
     "optimizers",
     "deeptime",
     "utils",
+    "EvidenceGreedy",
 ]
