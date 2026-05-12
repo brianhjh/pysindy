@@ -432,7 +432,9 @@ class EvidenceGreedy(BaseOptimizer):
         if self.normalize_columns:
             scale = y_norm.reshape(-1, 1)
             self.coef_ = self.coef_ * scale
-            self.coef_trajectories_ = self.coef_trajectories_ * y_norm.reshape(1, -1, 1)
+            self.coef_trajectories_ = (
+                self.coef_trajectories_ * y_norm.reshape(1, -1, 1)
+            )
 
         self.evidence_history_ = all_histories
         self.trajectory_sigma2s_ = base_sigma2s
