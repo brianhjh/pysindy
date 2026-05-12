@@ -1151,31 +1151,111 @@ class DiscreteSINDy(_BaseSINDy):
 
 class BINDy(SINDy):
     """
-    Bayesian SINDy wrapper around the EvidenceGreedy optimizer.
+    Bayesian Identification of Nonlinear Dynamical Systems (BINDy)
+
+    Learns a dynamical model with corrections for measurement noise
+    passing through differentiation and feature library.  Maximizes a Gaussian
+    (Laplace) approximation of the posterior with a weakly informed hyper
+    prior on the feature coefficients, then greedily eliminates model features to
+    maximize Bayesian evidence.
+
+    For more information, see this paper: https://doi.org/10.1098/rspa.2024.0200 .
+
+    .. seealso::
+
+        `SBR`
+            A Bayesian optimizer that uses a more sophisticated sparsifying prior
+            and Monte Carlo sampling. Slower but more accurate.
+
+        `EnsembleOptimizer`
+            Model sparsification by b(r)agging.
+            Empirically approximating Bayesian method.
 
     Parameters
     ----------
-    sigma_x : float
-        Measurement noise standard deviation in the state observations.
+    sigma_x (required): float
+        Measurement noise standard deviation (std) for the state measurements
+        ``x``. If ``x_dot`` is provided, ``sigma_x`` is used to set the noise
+        variance ``optimizer._sigma2 = sigma_x**2``.
+        Otherwise, ``sigma_x`` is propagated through the
+        ``differentiation_method`` to estimate the derivative noise variance::
+            _sigma2 = TemporalNoisePropagation(
+                differentiation_method, t_grid, sigma_x
+            )
+        For multiple trajectories, ``_sigma2`` is computed per trajectory and
+        averaged.
 
-    optimizer : BaseOptimizer, optional
-        Optimizer to use. Defaults to ``EvidenceGreedy()``.
+    optimizer
+        Optimization method used to fit the SINDy model. This must be a class
+        extending :class:`pysindy.optimizers.BaseOptimizer`.
+        The default is :class:`pysindy.optimizers.EvidenceGreedy`.
 
-    feature_library : BaseFeatureLibrary, optional
-        Feature library used to build candidate functions.
+    feature_library
+        Feature library object used to specify candidate right-hand side features.
+        This must be a class extending
+        :class:`pysindy.feature_library.base.BaseFeatureLibrary`.
+        The default option is :class:`pysindy.feature_library.PolynomialLibrary`.
 
-    differentiation_method : BaseDifferentiation, optional
-        Differentiation method used when ``x_dot`` is not supplied.
+    differentiation_method
+        Method for differentiating the data. This must be a class extending
+        :class:`pysindy.differentiation.base.BaseDifferentiation` class.
+        It must also be a linear method.
+        The default option is centered finite differences.
 
-    shared_support : bool, default=False
-        If False, multiple trajectories are handled using the standard stacked
-        PySINDy behavior. If True, BINDy performs shared-support
-        multi-trajectory evidence selection: the active support is selected
-        collectively across trajectories, while trajectory-specific MAP
-        coefficients are stored in ``optimizer.coef_trajectories_``.
-        Users should pass multiple trajectories as a list of arrays. Already
-        concatenated arrays are treated as a single trajectory and will not
-        trigger shared-support selection.
+    Attributes
+    ----------
+    model : ``sklearn.pipeline.Pipeline``
+        The fitted SINDy model pipeline.
+    n_input_features_ : int
+        The total number of input features.
+    n_output_features_ : int
+        The total number of output features.
+    n_control_features_ : int
+        The total number of control input features.
+    feature_names : list of str or None
+        Names for the input features.
+
+    Notes
+    -----
+    Noise propagation from measurement noise ``sigma_x`` to the derivative
+    noise variance used by the regression (``optimizer._sigma2``) is only
+    performed when:
+
+    1. ``x_dot`` is not provided, and derivatives are estimated internally.
+
+    2. ``differentiation_method`` is linear (e.g.,
+       :class:`~pysindy.differentiation.FiniteDifference` or
+       :class:`~pysindy.differentiation.SmoothedFiniteDifference`).
+
+    Spectral differentiation is currently not supported for noise
+    propagation.
+
+    - FiniteDifference is strongly recommended for EvidenceGreedy because the
+      noise propagation algorithm assumes a linear differential operator. If you
+      use a different differentiator, set ``optimizer._sigma2`` manually.
+
+    Examples
+    --------
+    >>> import numpy as np
+    >>> from scipy.integrate import odeint
+    >>> import pysindy as ps
+    >>> from pysindy.differentiation import FiniteDifference
+    >>> from pysindy.optimizers import EvidenceGreedy
+    >>>
+    >>> def lorenz(z, t):
+    ...     x, y, z_ = z
+    ...     return [10.0 * (y - x), x * (28.0 - z_) - y, x * y - 8.0 / 3.0 * z_]
+    >>>
+    >>> t = np.arange(0, 10, 0.01)
+    >>> x0 = np.array([-8.0, 8.0, 27.0])
+    >>> sigma_x = 0.01
+    >>> x = odeint(lorenz, x0, t)
+    >>> x = x + sigma_x * np.random.normal(size=x.shape) # add noise
+    >>> dt = t[1] - t[0]
+    >>>
+    >>> model = ps.BINDy(sigma_x=sigma_x) # You MUST specify sigma_x
+    >>> model.fit(x, t=dt)
+    >>> model.print()
     """
 
     def __init__(
@@ -1217,9 +1297,7 @@ class BINDy(SINDy):
         """
         Fit a BINDy model.
 
-        This follows the current SINDy input-processing pipeline, with
-        additional BINDy-specific handling of measurement noise and optional
-        shared-support multi-trajectory evidence selection.
+        See :meth:`pysindy.SINDy.fit` for full parameter documentation.
         """
         if not _check_multiple_trajectories(x, t, x_dot, u, sample_weight):
             x, t, x_dot, u, sample_weight = _adapt_to_multiple_trajectories(
