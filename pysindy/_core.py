@@ -1202,6 +1202,25 @@ class BINDy(SINDy):
         It must also be a linear method.
         The default option is centered finite differences.
 
+    shared_support : bool, optional
+        Whether to use shared-support multi-trajectory evidence selection.
+        If ``False``, multiple trajectories are handled using the standard
+        stacked PySINDy behaviour. If ``True``, BINDy selects one active
+        support collectively across trajectories by summing per-trajectory
+        evidences.
+
+        In shared-support mode, trajectory-specific MAP coefficients are stored
+        in ``optimizer.coef_trajectories_`` with shape
+        ``(n_trajectories, n_targets, n_features)``. The public coefficient
+        matrix ``optimizer.coef_`` is still a single pooled MAP refit on the
+        selected support, so that prediction, scoring, and printing remain
+        compatible with the standard PySINDy interface.
+
+        To enable shared-support fitting, pass multiple trajectories to
+        ``fit`` as a list of arrays. Already-concatenated arrays are treated
+        as a single trajectory and will not trigger shared-support selection.
+        The default is ``False``.
+
     Attributes
     ----------
     model : ``sklearn.pipeline.Pipeline``
@@ -1296,6 +1315,18 @@ class BINDy(SINDy):
     ):
         """
         Fit a BINDy model.
+
+        Notes
+        -----
+        When ``x_dot`` is supplied, BINDy does not propagate measurement noise
+        through the differentiation method and instead uses ``sigma_x**2`` as the
+        target noise variance. When ``x_dot`` is not supplied, BINDy estimates the
+        derivative noise variance by propagating ``sigma_x`` through the
+        differentiation method.
+
+        If ``shared_support=True`` and multiple trajectories are supplied as a list,
+        trajectory lengths and per-trajectory noise variances are inferred internally
+        and passed to ``EvidenceGreedy`` for shared-support evidence selection.
 
         See :meth:`pysindy.SINDy.fit` for full parameter documentation.
         """
