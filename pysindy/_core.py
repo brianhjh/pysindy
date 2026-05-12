@@ -1208,28 +1208,36 @@ class BINDy(SINDy):
     def fit(
         self,
         x,
-        t,
+        t: float | np.ndarray | Sequence[np.ndarray],
         x_dot=None,
         u=None,
         feature_names: Optional[list[str]] = None,
+        sample_weight: Optional[TrajectoryType] = None,
     ):
         """
         Fit a BINDy model.
 
-        See :meth:`pysindy.SINDy.fit` for full parameter documentation.
+        This follows the current SINDy input-processing pipeline, with
+        additional BINDy-specific handling of measurement noise and optional
+        shared-support multi-trajectory evidence selection.
         """
-        if not _check_multiple_trajectories(x, x_dot, u):
-            x, t, x_dot, u = _adapt_to_multiple_trajectories(x, t, x_dot, u)
+        if not _check_multiple_trajectories(x, t, x_dot, u, sample_weight):
+            x, t, x_dot, u, sample_weight = _adapt_to_multiple_trajectories(
+                x, t, x_dot, u, sample_weight
+            )
 
-        x, x_dot, u = _comprehend_and_validate_inputs(
-            x, t, x_dot, u, self.feature_library
-        )
+        x = [standardize_shape(xi) for xi in x]
+        t = [standardize_shape(ti) for ti in t]
+        if x_dot is not None:
+            x_dot = [standardize_shape(xdoti) for xdoti in x_dot]
+        if u is not None:
+            u = [standardize_shape(ui) for ui in u]
+        if sample_weight is not None:
+            sample_weight = [standardize_shape(wi) for wi in sample_weight]
+
+        _validate_inputs(x, t, x_dot, u)
 
         eps = float(np.finfo(float).eps)
-        trajectory_lengths = [
-            int(xi.shape[xi.ax_sample] if hasattr(xi, "ax_sample") else xi.shape[0])
-            for xi in x
-        ]
 
         if x_dot is None:
             trajectory_sigma2s = []
@@ -1237,12 +1245,13 @@ class BINDy(SINDy):
                 n_i = int(
                     xi.shape[xi.ax_sample] if hasattr(xi, "ax_sample") else xi.shape[0]
                 )
-                if np.isscalar(ti):
-                    t_grid = np.arange(n_i, dtype=float) * float(ti)
+                ti_arr = np.asarray(ti, dtype=float)
+                if ti_arr.ndim == 0 or ti_arr.size == 1:
+                    t_grid = np.arange(n_i, dtype=float) * float(ti_arr.reshape(-1)[0])
                 else:
-                    t_grid = np.asarray(ti, dtype=float).reshape(-1)
+                    t_grid = ti_arr.reshape(-1)
 
-                sigma2_i = EvidenceGreedy.TemporalNoisePropagation(
+                sigma2_i = TemporalNoisePropagation(
                     self.differentiation_method,
                     t_grid,
                     float(self.sigma_x),
@@ -1250,12 +1259,11 @@ class BINDy(SINDy):
                 trajectory_sigma2s.append(max(float(sigma2_i), eps))
 
             self.optimizer._sigma2 = float(np.mean(trajectory_sigma2s))
-            x, x_dot = self._process_trajectories(x, t, x_dot)
+            x_smooth, x_dot = self._process_trajectories(x, t, x_dot)
         else:
+            x_smooth = x
             self.optimizer._sigma2 = float(self.sigma_x**2)
-            trajectory_sigma2s = [float(self.optimizer._sigma2)] * len(
-                trajectory_lengths
-            )
+            trajectory_sigma2s = [float(self.optimizer._sigma2)] * len(x_smooth)
             msg = (
                 "BINDy: Noise is not propagated through the differentiation method. "
                 "Assuming noise variance from specified sigma_x. "
@@ -1266,19 +1274,51 @@ class BINDy(SINDy):
         if u is None:
             self.n_control_features_ = 0
         else:
-            u = validate_control_variables(x, u)
-            self.n_control_features_ = u[0].n_coord
-            x = [np.concatenate((xi, ui), axis=xi.ax_coord) for xi, ui in zip(x, u)]
+            u = validate_control_variables(x_smooth, u)
+            self.n_control_features_ = cast(int, u[0].n_coord)
+            x_smooth = [
+                np.concatenate((xi, ui), axis=xi.ax_coord)
+                for xi, ui in zip(x_smooth, u)
+            ]
 
-        self.feature_names = feature_names
+        self.feature_names_ = feature_names
 
-        x_dot = concat_sample_axis(x_dot)
-        x_feat_list = self.feature_library.fit_transform(x)
-        trajectory_lengths = [
-            int(xi.shape[xi.ax_sample] if hasattr(xi, "ax_sample") else xi.shape[0])
-            for xi in x_feat_list
-        ]
-        x = SampleConcatter().fit_transform(x_feat_list)
+        f_of_x = self.feature_library.fit_transform(x_smooth)
+
+        features_list = [concat_sample_axis([fi]) for fi in f_of_x]
+        x_dot_list = [concat_sample_axis([xdoti]) for xdoti in x_dot]
+
+        if sample_weight is None:
+            weight_list = [None] * len(features_list)
+        else:
+            weight_list = [concat_sample_axis([wi]) for wi in sample_weight]
+
+        clean_features = []
+        clean_x_dot = []
+        clean_weights = []
+        trajectory_lengths = []
+
+        for feats_i, xdot_i, weight_i in zip(
+            features_list, x_dot_list, weight_list, strict=True
+        ):
+            feats_i, xdot_i, weight_i = drop_nan_samples(feats_i, xdot_i, w=weight_i)
+            clean_features.append(feats_i)
+            clean_x_dot.append(xdot_i)
+            clean_weights.append(weight_i)
+            trajectory_lengths.append(int(feats_i.shape[0]))
+
+        features = np.vstack(clean_features)
+        x_dot = np.vstack(clean_x_dot)
+
+        if all(wi is None for wi in clean_weights):
+            w_concat = None
+        else:
+            clean_weights = [
+                np.ones((fi.shape[0], 1), dtype=float) if wi is None else wi
+                for fi, wi in zip(clean_features, clean_weights, strict=True)
+            ]
+            w_concat = np.vstack(clean_weights)
+            w_concat = w_concat.reshape(-1)
 
         self.trajectory_sigma2s_ = np.asarray(trajectory_sigma2s, dtype=float)
         self.trajectory_lengths_ = np.asarray(trajectory_lengths, dtype=int)
@@ -1295,10 +1335,15 @@ class BINDy(SINDy):
                 "shared_support": True,
             }
 
-        self.optimizer.fit(x, x_dot, **reduce_kws)
+        self.optimizer.fit(
+            features,
+            x_dot,
+            sample_weight=w_concat,
+            **reduce_kws,
+        )
         self._fit_shape()
-        return self
 
+        return self
 
 
 def _zip_like_sequence(x, t):
