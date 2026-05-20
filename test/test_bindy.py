@@ -19,6 +19,7 @@ from sklearn.utils.validation import check_is_fitted
 
 from pysindy import _core
 from pysindy import BINDy
+from pysindy.differentiation import FiniteDifference
 from pysindy.differentiation import SINDyDerivative
 from pysindy.differentiation import SmoothedFiniteDifference
 from pysindy.feature_library import FourierLibrary
@@ -344,6 +345,114 @@ def test_data_shapes():
     model.fit(x, t)
     x = np.ones((n, n, n, n, 2))
     model.fit(x, t)
+
+
+def _make_two_bindy_trajectories():
+    t = np.linspace(0.0, 1.0, 50)
+    x1 = np.column_stack([np.sin(t), np.cos(t)])
+    x2 = np.column_stack([np.sin(2 * t), np.cos(2 * t)])
+    xd1 = np.column_stack([np.cos(t), -np.sin(t)])
+    xd2 = np.column_stack([2 * np.cos(2 * t), -2 * np.sin(2 * t)])
+    return t, [x1, x2], [xd1, xd2]
+
+
+def _small_bindy_optimizer():
+    return EvidenceGreedy(max_iter=1)
+
+
+def test_bindy_scalar_sigma_x_shared_support_x_dot_supplied():
+    t, x, x_dot = _make_two_bindy_trajectories()
+    model = BINDy(
+        sigma_x=0.01,
+        optimizer=_small_bindy_optimizer(),
+        feature_library=PolynomialLibrary(degree=1, include_bias=True),
+        shared_support=True,
+    )
+
+    with pytest.warns(UserWarning, match="x_dot was supplied"):
+        model.fit(x, t=[t, t], x_dot=x_dot)
+
+    assert hasattr(model, "trajectory_sigma_xs_")
+    np.testing.assert_allclose(model.trajectory_sigma_xs_, [0.01, 0.01])
+    np.testing.assert_allclose(model.trajectory_sigma2s_, [1e-4, 1e-4])
+    assert model.optimizer.shared_support_ is True
+
+
+def test_bindy_list_sigma_x_shared_support_x_dot_supplied():
+    t, x, x_dot = _make_two_bindy_trajectories()
+    model = BINDy(
+        sigma_x=[0.01, 0.02],
+        optimizer=_small_bindy_optimizer(),
+        feature_library=PolynomialLibrary(degree=1, include_bias=True),
+        shared_support=True,
+    )
+
+    with pytest.warns(UserWarning, match="trajectory-specific variances"):
+        model.fit(x, t=[t, t], x_dot=x_dot)
+
+    np.testing.assert_allclose(model.trajectory_sigma_xs_, [0.01, 0.02])
+    np.testing.assert_allclose(model.trajectory_sigma2s_, [1e-4, 4e-4])
+    np.testing.assert_allclose(model.optimizer.trajectory_sigma2s_, [1e-4, 4e-4])
+    assert model.optimizer._sigma2 == pytest.approx(np.mean([1e-4, 4e-4]))
+
+
+def test_bindy_list_sigma_x_propagates_per_trajectory_without_x_dot():
+    t, x, _ = _make_two_bindy_trajectories()
+    model = BINDy(
+        sigma_x=[0.01, 0.02],
+        optimizer=_small_bindy_optimizer(),
+        feature_library=PolynomialLibrary(degree=1, include_bias=True),
+        differentiation_method=FiniteDifference(),
+        shared_support=True,
+    )
+
+    model.fit(x, t=[t, t])
+
+    np.testing.assert_allclose(model.trajectory_sigma_xs_, [0.01, 0.02])
+    assert model.trajectory_sigma2s_[1] > model.trajectory_sigma2s_[0]
+    sigma2_ratio = model.trajectory_sigma2s_[1] / model.trajectory_sigma2s_[0]
+    assert sigma2_ratio == pytest.approx(4.0, rel=0.1)
+
+
+def test_bindy_sigma_x_sequence_length_mismatch_raises():
+    t, x, x_dot = _make_two_bindy_trajectories()
+    model = BINDy(
+        sigma_x=[0.01, 0.02, 0.03],
+        optimizer=_small_bindy_optimizer(),
+        feature_library=PolynomialLibrary(degree=1, include_bias=True),
+    )
+
+    with pytest.raises(ValueError, match="length.*number of trajectories"):
+        model.fit(x, t=[t, t], x_dot=x_dot)
+
+
+def test_bindy_negative_sigma_x_sequence_raises():
+    t, x, x_dot = _make_two_bindy_trajectories()
+    model = BINDy(
+        sigma_x=[0.01, -0.02],
+        optimizer=_small_bindy_optimizer(),
+        feature_library=PolynomialLibrary(degree=1, include_bias=True),
+    )
+
+    with pytest.raises(ValueError, match="non-negative"):
+        model.fit(x, t=[t, t], x_dot=x_dot)
+
+
+def test_bindy_stacked_mode_uses_mean_sigma_x_variance_for_x_dot_supplied():
+    t, x, x_dot = _make_two_bindy_trajectories()
+    model = BINDy(
+        sigma_x=[0.01, 0.02],
+        optimizer=_small_bindy_optimizer(),
+        feature_library=PolynomialLibrary(degree=1, include_bias=True),
+        shared_support=False,
+    )
+
+    with pytest.warns(UserWarning, match="x_dot was supplied"):
+        model.fit(x, t=[t, t], x_dot=x_dot)
+
+    assert model.optimizer._sigma2 == pytest.approx(np.mean([1e-4, 4e-4]))
+    np.testing.assert_allclose(model.trajectory_sigma2s_, [1e-4, 4e-4])
+    assert model.optimizer.shared_support_ is False
 
 
 def _add_noise(x, sigma=sigma_x):

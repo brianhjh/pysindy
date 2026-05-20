@@ -1149,6 +1149,43 @@ class DiscreteSINDy(_BaseSINDy):
         return x
 
 
+def _expand_sigma_x_per_trajectory(sigma_x, n_trajectories: int) -> np.ndarray:
+    """Return one non-negative finite sigma_x value per trajectory."""
+    if n_trajectories <= 0:
+        raise ValueError("n_trajectories must be positive.")
+
+    message = (
+        "sigma_x must be a non-negative float or a sequence of non-negative floats."
+    )
+    if isinstance(sigma_x, str):
+        raise TypeError(message)
+
+    if np.isscalar(sigma_x):
+        values = np.full(n_trajectories, float(sigma_x), dtype=float)
+    else:
+        values = np.asarray(sigma_x, dtype=float)
+        if values.ndim != 1:
+            raise ValueError("sigma_x sequence must be one-dimensional.")
+        if values.shape[0] != n_trajectories:
+            raise ValueError(
+                "sigma_x was provided as a sequence, but its length "
+                f"({values.shape[0]}) does not match the number of trajectories "
+                f"({n_trajectories})."
+            )
+        values = values.astype(float, copy=False)
+
+    if np.any(~np.isfinite(values)):
+        raise ValueError("All sigma_x values must be finite.")
+    if np.any(values < 0):
+        raise ValueError("All sigma_x values must be non-negative.")
+
+    return values
+
+
+def _mean_positive_variance(variances, eps):
+    return max(float(np.mean(variances)), eps)
+
+
 class BINDy(SINDy):
     """
     Bayesian Identification of Nonlinear Dynamical Systems (BINDy)
@@ -1173,17 +1210,29 @@ class BINDy(SINDy):
 
     Parameters
     ----------
-    sigma_x (required): float
-        Measurement noise standard deviation (std) for the state measurements
-        ``x``. If ``x_dot`` is provided, ``sigma_x`` is used to set the noise
-        variance ``optimizer._sigma2 = sigma_x**2``.
-        Otherwise, ``sigma_x`` is propagated through the
-        ``differentiation_method`` to estimate the derivative noise variance::
+    sigma_x (required): float or sequence of float
+        Noise standard deviation (std). A scalar value is used for every
+        trajectory. A sequence supplies one standard deviation per trajectory,
+        and its length must match the number of trajectories passed to ``fit``.
+
+        If ``x_dot`` is not provided, ``sigma_x`` values are interpreted as
+        state-measurement noise standard deviations and are propagated
+        trajectory-by-trajectory through the ``differentiation_method`` to
+        estimate derivative noise variances::
             _sigma2 = TemporalNoisePropagation(
                 differentiation_method, t_grid, sigma_x
             )
-        For multiple trajectories, ``_sigma2`` is computed per trajectory and
-        averaged.
+
+        If ``x_dot`` is provided, ``sigma_x`` values are interpreted as
+        supplied-target noise standard deviations for the supplied derivative
+        trajectories, and are squared to obtain trajectory-specific likelihood
+        variances.
+
+        In ``shared_support=True`` mode, trajectory-specific variances are
+        passed to :class:`pysindy.optimizers.EvidenceGreedy` as
+        ``trajectory_sigma2s``. In ordinary stacked mode, the optimizer exposes
+        only one public ``optimizer._sigma2`` value, so BINDy uses the mean of
+        the trajectory variances.
 
     optimizer
         Optimization method used to fit the SINDy model. This must be a class
@@ -1275,17 +1324,29 @@ class BINDy(SINDy):
     >>> model = ps.BINDy(sigma_x=sigma_x) # You MUST specify sigma_x
     >>> model.fit(x, t=dt)
     >>> model.print()
+    >>>
+    >>> sigma_x = [0.01, 0.02, 0.015]
+    >>> model = ps.BINDy(sigma_x=sigma_x, shared_support=True)
+    >>> model.fit([x1, x2, x3], t=[t1, t2, t3])
+    >>>
+    >>> # If x_dot is supplied, entries of sigma_x are target-noise standard
+    >>> # deviations for the supplied x_dot trajectories.
     """
 
     def __init__(
         self,
-        sigma_x: float,
+        sigma_x: float | Sequence[float] | np.ndarray,
         optimizer: Optional[BaseOptimizer] = None,
         feature_library: Optional[BaseFeatureLibrary] = None,
         differentiation_method: Optional[BaseDifferentiation] = None,
         shared_support: bool = False,
     ):
-        if sigma_x < 0:
+        if isinstance(sigma_x, str):
+            raise TypeError(
+                "sigma_x must be a non-negative float or a sequence of "
+                "non-negative floats."
+            )
+        if np.isscalar(sigma_x) and float(sigma_x) < 0:
             raise ValueError("sigma_x must be non-negative.")
         if not isinstance(shared_support, bool):
             raise TypeError("shared_support must be a boolean.")
@@ -1295,7 +1356,7 @@ class BINDy(SINDy):
         if not isinstance(optimizer, EvidenceGreedy):
             raise TypeError("BINDy currently requires an EvidenceGreedy optimizer.")
 
-        self.sigma_x = float(sigma_x)
+        self.sigma_x = sigma_x
         self.shared_support = shared_support
 
         super().__init__(
@@ -1319,10 +1380,10 @@ class BINDy(SINDy):
         Notes
         -----
         When ``x_dot`` is supplied, BINDy does not propagate measurement noise
-        through the differentiation method and instead uses ``sigma_x**2`` as the
-        target noise variance. When ``x_dot`` is not supplied, BINDy estimates the
-        derivative noise variance by propagating ``sigma_x`` through the
-        differentiation method.
+        through the differentiation method and instead interprets ``sigma_x`` as
+        supplied-target noise standard deviation(s). When ``x_dot`` is not
+        supplied, BINDy estimates derivative noise variance by propagating
+        ``sigma_x`` through the differentiation method per trajectory.
 
         If ``shared_support=True`` and multiple trajectories are supplied as a list,
         trajectory lengths and per-trajectory noise variances are inferred internally
@@ -1347,10 +1408,12 @@ class BINDy(SINDy):
         _validate_inputs(x, t, x_dot, u)
 
         eps = float(np.finfo(float).eps)
+        sigma_x_values = _expand_sigma_x_per_trajectory(self.sigma_x, len(x))
+        self.trajectory_sigma_xs_ = sigma_x_values.copy()
 
         if x_dot is None:
             trajectory_sigma2s = []
-            for xi, ti in _zip_like_sequence(x, t):
+            for xi, ti, sigma_x_i in zip(x, t, sigma_x_values, strict=True):
                 n_i = int(
                     xi.shape[xi.ax_sample] if hasattr(xi, "ax_sample") else xi.shape[0]
                 )
@@ -1363,19 +1426,23 @@ class BINDy(SINDy):
                 sigma2_i = TemporalNoisePropagation(
                     self.differentiation_method,
                     t_grid,
-                    float(self.sigma_x),
+                    float(sigma_x_i),
                 )
                 trajectory_sigma2s.append(max(float(sigma2_i), eps))
 
-            self.optimizer._sigma2 = float(np.mean(trajectory_sigma2s))
+            self.optimizer._sigma2 = _mean_positive_variance(trajectory_sigma2s, eps)
             x_smooth, x_dot = self._process_trajectories(x, t, x_dot)
         else:
             x_smooth = x
-            self.optimizer._sigma2 = float(self.sigma_x**2)
-            trajectory_sigma2s = [float(self.optimizer._sigma2)] * len(x_smooth)
+            trajectory_sigma2s = [
+                max(float(sigma_x_i) ** 2, eps) for sigma_x_i in sigma_x_values
+            ]
+            self.optimizer._sigma2 = _mean_positive_variance(trajectory_sigma2s, eps)
             msg = (
-                "BINDy: Noise is not propagated through the differentiation method. "
-                "Assuming noise variance from specified sigma_x. "
+                "BINDy: x_dot was supplied, so noise is not propagated through "
+                "the differentiation method. The sigma_x value(s) are interpreted "
+                "as supplied-target noise standard deviations, and trajectory-specific "
+                "variances are used when shared_support=True. "
                 f"_sigma2 value used: {self.optimizer._sigma2}"
             )
             warnings.warn(msg, UserWarning)
@@ -1432,6 +1499,8 @@ class BINDy(SINDy):
         self.trajectory_sigma2s_ = np.asarray(trajectory_sigma2s, dtype=float)
         self.trajectory_lengths_ = np.asarray(trajectory_lengths, dtype=int)
 
+        # In ordinary stacked mode, EvidenceGreedy uses a single likelihood
+        # variance. For per-trajectory variances, use shared_support=True.
         reduce_kws = {}
         if (
             isinstance(self.optimizer, EvidenceGreedy)

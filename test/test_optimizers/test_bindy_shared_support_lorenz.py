@@ -35,7 +35,11 @@ def generate_lorenz_trajectory(x0, t):
 
 
 def test_bindy_shared_support_lorenz_multiple_trajectories():
-    """BINDy should fit Lorenz data using shared-support multi-trajectory mode."""
+    """BINDy should fit Lorenz data using shared-support multi-trajectory mode.
+        TODO: different coef & diff magnitude of noise (pass in list of sigmaX for each), 
+        stay in a similar range X drastic, initial condition (can be variant)
+        taking in inputs coef as inputs, length of trajectory vary it. randomize 
+    """
     t = np.linspace(0.0, 1.0, 201)
 
     initial_conditions = [
